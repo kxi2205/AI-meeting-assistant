@@ -175,17 +175,27 @@ class MeetingDatabase:
         """
         try:
             total_meetings = self.meetings.count_documents({})
+            uploaded_recordings = self.meetings.count_documents({'meeting_type': 'uploaded_recording'})
+            live_meetings = self.meetings.count_documents({'meeting_type': 'live_meeting'})
             total_actions = self.action_items.count_documents({})
             pending_actions = self.action_items.count_documents({'status': 'pending'})
             
             return {
                 'total_meetings': total_meetings,
+                'uploaded_recordings': uploaded_recordings,
+                'live_meetings': live_meetings,
                 'total_action_items': total_actions,
                 'pending_actions': pending_actions
             }
         except Exception as e:
             print(f"❌ Error getting statistics: {e}")
-            return {'total_meetings': 0, 'total_action_items': 0, 'pending_actions': 0}
+            return {
+                'total_meetings': 0,
+                'uploaded_recordings': 0,
+                'live_meetings': 0,
+                'total_action_items': 0,
+                'pending_actions': 0
+            }
 
 # Create a global database instance
 db = MeetingDatabase()

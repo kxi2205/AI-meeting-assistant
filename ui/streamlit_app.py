@@ -15,7 +15,15 @@ from agents.summary_agent import SummaryAgent
 from agents.action_item_agent import ActionItemAgent
 from database.mongodb_client import db
 from rag.vector_store import VectorStore
+from integrations.meeting_bot import join_and_capture_audio, MeetingConfig, MeetingBot
 import config.settings as settings
+import threading
+
+try:
+    import sounddevice as sd
+    AUDIO_AVAILABLE = True
+except:
+    AUDIO_AVAILABLE = False
 
 # Page configuration
 st.set_page_config(
@@ -62,18 +70,24 @@ def main():
         with st.expander("📊 Database Stats"):
             try:
                 stats = db.get_statistics()
-                st.metric("Total Meetings", stats['total_meetings'])
-                st.metric("Total Action Items", stats['total_action_items'])
-                st.metric("Pending Actions", stats['pending_actions'])
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("📁 Recordings", stats.get('uploaded_recordings', 0))
+                with col2:
+                    st.metric("🤖 Live Meetings", stats.get('live_meetings', 0))
+                st.metric("Total Action Items", stats.get('total_action_items', 0))
+                st.metric("Pending Actions", stats.get('pending_actions', 0))
             except Exception as e:
                 st.error(f"Could not load stats: {e}")
+                import traceback
+                st.code(traceback.format_exc())
         
         st.divider()
         
         # Navigation
         page = st.radio(
             "Navigate",
-            ["🎙️ New Meeting", "📚 Past Meetings", "✅ Action Items"],
+            ["🎙️ New Meeting", "🤖 Join Live Meeting", "📚 Past Meetings", "✅ Action Items"],
             label_visibility="collapsed"
         )
     
@@ -91,10 +105,444 @@ def main():
     # Route to appropriate page
     if page == "🎙️ New Meeting":
         new_meeting_page()
+    elif page == "🤖 Join Live Meeting":
+        live_meeting_page()
     elif page == "📚 Past Meetings":
         past_meetings_page()
     elif page == "✅ Action Items":
         action_items_page()
+
+def live_meeting_page():
+    """Page for joining live meetings with bot"""
+    st.header("🤖 Join Live Meeting")
+    st.markdown("Enter a meeting link and the bot will join automatically to capture and transcribe audio in real-time!")
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        # Meeting platform selection
+        platform = st.selectbox(
+            "Meeting Platform",
+            ["Google Meet", "Zoom"],
+            help="Select the platform for your meeting"
+        )
+        
+        # Meeting URL input
+        meeting_url = st.text_input(
+            "Meeting URL",
+            placeholder="https://meet.google.com/abc-defg-hij or https://zoom.us/j/123456789",
+            help="Paste the full meeting link here"
+        )
+        
+        # Meeting details
+        col_a, col_b = st.columns(2)
+        with col_a:
+            meeting_title = st.text_input(
+                "Meeting Title (optional)",
+                placeholder="e.g., Team Standup"
+            )
+        with col_b:
+            duration = st.number_input(
+                "Max Duration (minutes)",
+                min_value=1,
+                max_value=180,
+                value=30,
+                help="Bot will automatically leave after this time"
+            )
+        
+        participants = st.text_input(
+            "Expected Participants (optional)",
+            placeholder="John, Sarah, Mike"
+        )
+    
+    with col2:
+        st.info("""
+        **How it works:**
+        
+        1. 🌐 Bot opens browser
+        2. 🎯 Joins meeting as "AI Meeting Assistant Bot"
+        3. 🎤 Captures audio in real-time
+        4. 📝 Transcribes every 30 seconds
+        5. 💾 Saves complete transcript
+        
+        **Requirements:**
+        - Stereo Mix or VB-CABLE enabled
+        - Browser will open (don't close it!)
+        - For Google Meet: May need to log in
+        
+        **The bot will:**
+        - ✅ Turn off camera
+        - ✅ Mute microphone
+        - ✅ Be visible to participants
+        """)
+    
+    st.divider()
+    
+    # Audio device selection
+    st.markdown("### 🎤 Audio Device Setup")
+    
+    if AUDIO_AVAILABLE:
+        try:
+            devices = sd.query_devices()
+            input_devices = []
+            
+            for i, device in enumerate(devices):
+                if device['max_input_channels'] > 0:
+                    input_devices.append({
+                        'index': i,
+                        'name': device['name']
+                    })
+            
+            if input_devices:
+                device_options = [f"[{d['index']}] {d['name']}" for d in input_devices]
+                
+                # Try to find Stereo Mix or loopback device
+                default_idx = 0
+                for i, d in enumerate(input_devices):
+                    device_name_lower = d['name'].lower()
+                    if any(keyword in device_name_lower for keyword in ['stereo mix', 'cable', 'loopback', 'blackhole']):
+                        default_idx = i
+                        st.success(f"✅ Found virtual audio device: {d['name']}")
+                        break
+                
+                selected_device_str = st.selectbox(
+                    "Select Audio Input Device",
+                    device_options,
+                    index=default_idx,
+                    help="Select your virtual audio cable or Stereo Mix device. For testing, you can also use your Microphone.",
+                    key="audio_device_selector"
+                )
+                
+                # Extract and store device index
+                device_index = int(selected_device_str.split('[')[1].split(']')[0])
+                st.session_state['selected_device_index'] = device_index
+                st.session_state['selected_device_str'] = selected_device_str
+                
+                # Show device-specific help
+                if 'Stereo Mix' in selected_device_str:
+                    st.warning("⚠️ **Stereo Mix selected!** Make sure it's ENABLED first (see instructions below)")
+                elif 'Microphone' in selected_device_str:
+                    st.info("💡 **Microphone selected.** This works but won't capture meeting audio well. Use Stereo Mix for better results.")
+                
+                st.info(f"💡 Using device index: {device_index}")
+            else:
+                st.error("❌ No audio input devices found!")
+                st.session_state['selected_device_index'] = None
+        except Exception as e:
+            st.error(f"❌ Error loading audio devices: {e}")
+            st.session_state['selected_device_index'] = None
+    else:
+        st.error("❌ sounddevice not installed. Run: pip install sounddevice")
+        st.session_state['selected_device_index'] = None
+    
+    # Setup instructions
+    with st.expander("⚙️ **IMPORTANT: Enable Stereo Mix First!**", expanded=True):
+        st.markdown("""
+        ### 🔴 Steps to Enable Stereo Mix (Windows):
+        
+        **If you're getting audio errors, follow these steps:**
+        
+        1. **Right-click** the 🔊 **speaker icon** in your taskbar (bottom-right corner)
+        2. Click **"Sounds"** or **"Open Sound settings"** → **"Sound Control Panel"**
+        3. Go to **"Recording"** tab
+        4. **Right-click** in the empty space
+        5. Check ✅ **"Show Disabled Devices"**
+        6. You should now see **"Stereo Mix"** in the list
+        7. **Right-click** on **"Stereo Mix"** → Click **"Enable"**
+        8. **Right-click** on **"Stereo Mix"** again → Click **"Set as Default Device"**
+        9. Click **"OK"** to save
+        10. **Refresh this page** and select Stereo Mix again
+        
+        ---
+        
+        ### 🎤 **Quick Test Option:**
+        
+        **Don't want to setup Stereo Mix right now?**
+        - Select any **"Microphone"** device from the dropdown above
+        - It will work for testing (but won't capture meeting audio well)
+        - Stereo Mix is needed to capture what meeting participants are saying
+        
+        ---
+        
+        ### 📦 **Alternative: Install VB-CABLE**
+        
+        If Stereo Mix doesn't work:
+        - Download: https://vb-audio.com/Cable/
+        - Install, restart, then set "CABLE Output" as recording device
+        """)
+    
+    st.divider()
+    
+    # Additional info
+    with st.expander("ℹ️ About the Meeting Bot"):
+        st.markdown("""
+        **What the bot does:**
+        - Joins meeting in browser window  
+        - Appears as "AI Meeting Assistant Bot"
+        - Captures meeting audio via system
+        - Transcribes with Whisper AI
+        
+        **Important:**
+        - ✅ Bot is visible to all participants
+        - ✅ Always get consent before recording
+        """)
+    
+    # Validate device before allowing join
+    device_ready = AUDIO_AVAILABLE and st.session_state.get('selected_device_index') is not None
+    
+    # Audio setup check
+    with st.expander("🔊 Audio Troubleshooting"):
+        st.caption("Having audio issues?")
+        st.markdown("""
+        **Test your audio device in terminal:**
+        ```bash
+        python integrations/audio_device_helper.py
+        ```
+        
+        **If you get "Invalid device" error:**
+        - Your selected device is disabled in Windows
+        - Follow the "Enable Stereo Mix" steps above
+        - OR select a Microphone device for quick testing
+        
+        **Files with detailed help:**
+        - `ENABLE_STEREO_MIX.md` - Step-by-step Stereo Mix guide
+        - `MEETING_BOT_GUIDE.md` - Complete documentation
+        """)
+    
+    # Validate URL
+    url_valid = meeting_url and (
+        meeting_url.startswith("https://meet.google.com/") or
+        meeting_url.startswith("https://zoom.us/") or
+        "zoom.us" in meeting_url
+    )
+    
+    # Check if device is ready
+    device_ready = AUDIO_AVAILABLE and st.session_state.get('selected_device_index') is not None
+    
+    # Join button
+    if meeting_url:
+        if url_valid and device_ready:
+            if st.button("🚀 Join Meeting Now", type="primary", use_container_width=True):
+                # Convert platform name
+                platform_code = "google_meet" if platform == "Google Meet" else "zoom"
+                
+                # Join meeting (no warnings needed - fully automated)
+                join_live_meeting(meeting_url, platform_code, duration, meeting_title, participants)
+        elif not device_ready:
+            st.error("❌ Please enable and select Stereo Mix in the audio device selector above.")
+            st.info("💡 After enabling Stereo Mix in Windows settings, refresh this page.")
+        else:
+            st.error("❌ Invalid meeting URL. Please check the format.")
+    else:
+        st.info("👆 Enter a meeting URL above to start")
+
+def join_live_meeting(url, platform, duration, title, participants_str):
+    """Join live meeting with bot and process results"""
+    meeting_id = str(uuid.uuid4())[:8]
+    
+    # Get audio device selection BEFORE any threading
+    # This avoids session state access issues
+    device_index = None
+    if AUDIO_AVAILABLE and 'selected_device_index' in st.session_state:
+        device_index = st.session_state['selected_device_index']
+    
+    # Create configuration BEFORE threading to avoid session state conflicts
+    config = MeetingConfig(
+        meeting_url=url,
+        platform=platform,
+        duration_minutes=duration,
+        audio_device=device_index,
+        headless=True,  # Run in background
+        bot_name="AI Meeting Assistant Bot"
+    )
+    
+    try:
+        st.info(f"🤖 Starting fully automated bot...")
+        
+        # Create a container for live updates
+        status_container = st.empty()
+        progress_bar = st.progress(0)
+        
+        with status_container.container():
+            st.markdown("### 🔄 Bot Status")
+            st.write("🤖 Bot starting in background (invisible mode)...")
+            if device_index is not None:
+                st.write(f"🎤 Audio device: Index {device_index}")
+            st.success(f"""
+            **✅ Bot is completely automated!**
+            - Running in background (invisible)
+            - Auto-joining as "{config.bot_name}"
+            - Camera/mic off automatically
+            - Real-time transcription active
+            - Duration: {duration} minutes
+            
+            **No actions needed - fully automatic!**
+            """)
+        
+        # Run meeting bot in a separate thread to avoid asyncio conflicts
+        import asyncio
+        import queue as queue_module
+        import time
+        
+        result_queue = queue_module.Queue()
+        bot_instance = [None]  # Use list to store reference for stop control
+        
+        def run_bot():
+            try:
+                # Create new event loop for this thread
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                # Create bot and run (config already created in main thread)
+                bot = MeetingBot(config)
+                bot_instance[0] = bot  # Store reference
+                result = loop.run_until_complete(bot.join_meeting())
+                result_queue.put(('success', result))
+            except Exception as e:
+                result_queue.put(('error', e))
+            finally:
+                loop.close()
+        
+        # Start bot thread
+        bot_thread = threading.Thread(target=run_bot, daemon=True)
+        bot_thread.start()
+        
+        # Add stop button placeholder
+        stop_placeholder = st.empty()
+        
+        # Wait for completion with timeout
+        max_wait = (duration * 60) + 120  # Duration + 2 min buffer
+        start_time = time.time()
+        
+        while bot_thread.is_alive() and (time.time() - start_time) < max_wait:
+            elapsed = int(time.time() - start_time)
+            progress = min(int((elapsed / (duration * 60)) * 100), 99)
+            progress_bar.progress(progress)
+            
+            # Show stop button
+            with stop_placeholder:
+                if st.button("🛑 Stop Bot & Leave Meeting", key=f"stop_bot_{elapsed}"):
+                    if bot_instance[0]:
+                        bot_instance[0].stop()
+                        st.warning("🛑 Stopping bot... Please wait.")
+                        time.sleep(3)
+                        break
+            
+            time.sleep(1)
+        
+        # Get result
+        try:
+            status, result = result_queue.get(timeout=5)
+        except Exception as e:
+            st.warning("⚠️ Meeting bot stopped unexpectedly")
+            st.info("If the bot appeared in the meeting briefly, this is normal - it may have joined successfully but closed early.")
+            return
+        
+        if status == 'error':
+            raise result
+        
+        progress_bar.progress(100)
+        
+        st.success("✅ Meeting bot has left the meeting!")
+        
+        # Get results
+        transcript_text = result['full_transcript']
+        
+        # Display transcript
+        st.markdown("---")
+        st.markdown("### 📝 Meeting Transcript")
+        with st.expander("View Full Transcript", expanded=True):
+            st.text_area("Transcript", transcript_text, height=300, key="live_transcript")
+            
+            # Show chunks info
+            st.caption(f"Transcribed in {result['total_chunks']} chunks")
+        
+        # Generate summary
+        st.markdown("---")
+        with st.spinner("📊 Generating summary..."):
+            participants_list = [p.strip() for p in participants_str.split(',')] if participants_str else []
+            summary_result = st.session_state.summary_agent.generate_summary(
+                transcript_text,
+                meeting_context={
+                    'title': title or "Live Meeting",
+                    'date': datetime.now().strftime("%Y-%m-%d"),
+                    'participants': participants_list
+                }
+            )
+            summary = summary_result['summary']
+        
+        st.markdown("### 📋 Meeting Summary")
+        with st.expander("View Summary", expanded=True):
+            st.markdown(summary)
+        
+        # Extract action items
+        with st.spinner("✅ Extracting action items..."):
+            action_items = st.session_state.action_agent.extract_action_items(transcript_text)
+        
+        if action_items:
+            st.markdown("### 📌 Action Items")
+            with st.expander(f"View {len(action_items)} Action Items", expanded=True):
+                for i, item in enumerate(action_items, 1):
+                    priority_color = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+                    emoji = priority_color.get(item.get('priority', 'medium'), '⚪')
+                    
+                    st.markdown(f"**{i}. {emoji} {item['task']}**")
+                    col1, col2, col3 = st.columns(3)
+                    col1.caption(f"👤 Owner: {item.get('owner', 'Unassigned')}")
+                    col2.caption(f"📅 Deadline: {item.get('deadline', 'Not specified')}")
+                    col3.caption(f"⚡ Priority: {item.get('priority', 'medium')}")
+                    st.divider()
+        
+        # Save to database
+        with st.spinner("💾 Saving to database..."):
+            meeting_data = {
+                "meeting_id": meeting_id,
+                "title": title or "Live Meeting",
+                "date": datetime.now().isoformat(),
+                "participants": participants_list if participants_str else [],
+                "transcript": transcript_text,
+                "summary": summary,
+                "duration": duration * 60,  # Convert to seconds
+                "meeting_url": url,
+                "platform": platform,
+                "meeting_type": "live_meeting",  # Track meeting type
+                "is_live_capture": True
+            }
+            db.save_meeting(meeting_data)
+            
+            # Save action items
+            for item in action_items:
+                item['meeting_id'] = meeting_id
+                db.save_action_item(item)
+            
+            # Save to vector store
+            st.session_state.vector_store.add_meeting(
+                meeting_id=meeting_id,
+                transcript=transcript_text,
+                metadata={
+                    "title": title or "Live Meeting",
+                    "date": datetime.now().strftime("%Y-%m-%d"),
+                    "participants": participants_str or "Unknown"
+                }
+            )
+        
+        st.success("🎉 Meeting processed and saved successfully!")
+        st.balloons()
+        
+        # Show file location
+        st.info(f"📁 Transcript saved to: `{result['transcript_path']}`")
+        
+    except Exception as e:
+        st.error(f"❌ Error: {e}")
+        st.markdown("**Troubleshooting:**")
+        st.markdown("1. Ensure VB-CABLE is installed and configured")
+        st.markdown("2. Run: `python integrations/audio_device_helper.py`")
+        st.markdown("3. Check that the meeting URL is correct")
+        st.markdown("4. For Google Meet, you may need to log in manually when prompted")
+        
+        with st.expander("View Error Details"):
+            import traceback
+            st.code(traceback.format_exc())
 
 def new_meeting_page():
     """Page for uploading and processing new meetings"""
@@ -209,7 +657,9 @@ def process_meeting(audio_file, title, participants_str):
                 "transcript": transcript_text,
                 "summary": summary,
                 "duration": transcription.get('duration', 0),
-                "audio_file": str(audio_path)
+                "audio_file": str(audio_path),
+                "meeting_type": "uploaded_recording",  # Track meeting type
+                "meeting_url": None  # No URL for uploaded recordings
             }
             db.save_meeting(meeting_data)
             
@@ -242,93 +692,140 @@ def past_meetings_page():
     st.header("📚 Past Meetings")
     
     try:
-        meetings = db.get_all_meetings(limit=20)
+        meetings = db.get_all_meetings(limit=50)
         
         if not meetings:
             st.info("No meetings found. Upload your first meeting!")
             return
         
-        # Search
-        search_query = st.text_input("🔍 Search meetings", placeholder="Search by title, participants...")
+        # Search and filter
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            search_query = st.text_input("🔍 Search meetings", placeholder="Search by title, participants...")
+        with col2:
+            filter_type = st.selectbox("Filter", ["All", "Live Meetings", "Recordings"])
         
-        # Filter meetings
+        # Apply filters
+        filtered_meetings = meetings
         if search_query:
-            meetings = [m for m in meetings if 
+            filtered_meetings = [m for m in filtered_meetings if 
                        search_query.lower() in m.get('title', '').lower() or
                        search_query.lower() in str(m.get('participants', [])).lower()]
         
-        st.write(f"Found {len(meetings)} meeting(s)")
+        if filter_type == "Live Meetings":
+            filtered_meetings = [m for m in filtered_meetings if m.get('meeting_type') == 'live_meeting']
+        elif filter_type == "Recordings":
+            filtered_meetings = [m for m in filtered_meetings if m.get('meeting_type') == 'uploaded_recording']
+        
+        st.write(f"Found {len(filtered_meetings)} meeting(s)")
         
         # Display meetings
-        for meeting in meetings:
-            with st.expander(f"🎙️ {meeting.get('title', 'Untitled')} - {meeting.get('date', '')[:10]}"):
-                col1, col2 = st.columns([2, 1])
-                
+        for meeting in filtered_meetings:
+            # Meeting type badge
+            meeting_type = meeting.get('meeting_type', 'uploaded_recording')
+            if meeting_type == 'live_meeting':
+                type_badge = "🤖 Live Meeting"
+            else:
+                type_badge = "📁 Uploaded Recording"
+            
+            # Expander title
+            title_text = f"{type_badge} | {meeting.get('title', 'Untitled')} - {meeting.get('date', '')[:10]}"
+            
+            with st.expander(title_text, expanded=False):
+                # Header row with delete button
+                col1, col2 = st.columns([5, 1])
                 with col1:
-                    st.markdown(f"**Participants:** {', '.join(meeting.get('participants', []))}")
-                    st.markdown(f"**Duration:** {meeting.get('duration', 0):.1f} seconds")
+                    st.markdown(f"**📅 Date:** {meeting.get('date', 'Unknown')[:19]}")
+                    st.markdown(f"**👥 Participants:** {', '.join(meeting.get('participants', ['No participants'])) or 'Not specified'}")
+                    st.markdown(f"**⏱️ Duration:** {meeting.get('duration', 0):.1f} seconds")
                     
-                    # View Full Details button
-                    if st.button("View Full Details", key=f"view_{meeting['meeting_id']}"):
-                        st.markdown("### Summary")
-                        st.markdown(meeting.get('summary', 'No summary available'))
-                        
-                        st.markdown("### Transcript")
-                        st.text_area("", meeting.get('transcript', ''), height=200, 
-                                   key=f"transcript_{meeting['meeting_id']}")
+                    # Show meeting link for live meetings
+                    if meeting_type == 'live_meeting' and meeting.get('meeting_url'):
+                        st.markdown(f"**🔗 Meeting Link:** [{meeting.get('platform', 'Link')}]({meeting['meeting_url']})")
+                
+                with col2:
+                    if st.button("🗑️ Delete", key=f"del_{meeting['meeting_id']}", type="secondary"):
+                        with st.spinner("Deleting..."):
+                            db.delete_meeting(meeting['meeting_id'])
+                            st.session_state.vector_store.delete_meeting(meeting['meeting_id'])
+                            st.success("Deleted!")
+                            st.rerun()
+                
+                st.divider()
+                
+                # Summary Section
+                with st.container():
+                    st.markdown("### 📝 Summary")
+                    summary_text = meeting.get('summary', 'No summary available')
+                    st.markdown(summary_text)
+                
+                st.divider()
+                
+                # Action Items Section
+                with st.container():
+                    st.markdown("### ✅ Action Items")
+                    actions = db.get_action_items(meeting_id=meeting['meeting_id'])
                     
-                    # Ask Questions button
-                    if st.button("💬 Ask Questions", key=f"ask_{meeting['meeting_id']}"):
-                        st.session_state[f"show_qa_{meeting['meeting_id']}"] = True
+                    if actions:
+                        for idx, item in enumerate(actions, 1):
+                            priority_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+                            emoji = priority_emoji.get(item.get('priority', 'medium'), '⚪')
+                            status_emoji = {"pending": "⏳", "in_progress": "🔄", "completed": "✅"}
+                            status = status_emoji.get(item.get('status', 'pending'), '⏳')
+                            
+                            st.markdown(f"{idx}. {emoji} {status} **{item['task']}** - {item.get('owner', 'Unassigned')} (Deadline: {item.get('deadline', 'N/A')})")
+                    else:
+                        st.info("No action items for this meeting")
+                
+                st.divider()
+                
+                # Transcript Section
+                with st.container():
+                    st.markdown("### 📄 Full Transcript")
+                    transcript_text = meeting.get('transcript', 'No transcript available')
+                    st.text_area("", transcript_text, height=200, key=f"transcript_{meeting['meeting_id']}", label_visibility="collapsed")
+                
+                st.divider()
+                
+                # Ask Questions Section
+                with st.container():
+                    st.markdown("### 💬 Ask Questions About This Meeting")
+                    st.caption("Ask specific questions about this meeting or general knowledge questions")
                     
-                    # Show Q&A interface if button was clicked
-                    if st.session_state.get(f"show_qa_{meeting['meeting_id']}", False):
-                        st.markdown("---")
-                        st.markdown("### 💬 Ask Questions About This Meeting")
-                        st.caption("Ask about this specific meeting or general questions for definitions, examples, ideas, etc.")
-                        
-                        question = st.text_input(
-                            "Your question", 
-                            placeholder="What was discussed? Or: What is steganography?",
-                            key=f"q_{meeting['meeting_id']}"
-                        )
-                        
-                        if question:
-                            with st.spinner("🔍 Thinking..."):
-                                try:
-                                    # Build context with meeting metadata AND transcript
-                                    meeting_context = f"""Meeting Title: {meeting.get('title', 'Untitled')}
+                    question = st.text_input(
+                        "Your question", 
+                        placeholder="What was discussed? What decisions were made?",
+                        key=f"q_{meeting['meeting_id']}"
+                    )
+                    
+                    if question:
+                        with st.spinner("🔍 Thinking..."):
+                            try:
+                                # Build context with meeting metadata AND transcript
+                                meeting_context = f"""Meeting Title: {meeting.get('title', 'Untitled')}
 Date: {meeting.get('date', 'Unknown')[:10]}
 Participants: {', '.join(meeting.get('participants', ['Not specified']))}
 Duration: {meeting.get('duration', 0):.1f} seconds
 
 TRANSCRIPT:
 {meeting.get('transcript', '')}"""
-                                    
-                                    # Generate answer with full context
-                                    answer = st.session_state.summary_agent.answer_question(
-                                        transcript=meeting_context,
-                                        question=question
-                                    )
-                                    
-                                    st.markdown("**Answer:**")
-                                    st.markdown(answer)
-                                    
-                                except Exception as e:
-                                    st.error(f"Error: {e}")
-                
-                with col2:
-                    # Action items count
-                    actions = db.get_action_items(meeting_id=meeting['meeting_id'])
-                    st.metric("Action Items", len(actions))
-                    
-                    if st.button("🗑️ Delete", key=f"del_{meeting['meeting_id']}"):
-                        db.delete_meeting(meeting['meeting_id'])
-                        st.session_state.vector_store.delete_meeting(meeting['meeting_id'])
-                        st.rerun()
+                                
+                                # Generate answer with full context
+                                answer = st.session_state.summary_agent.answer_question(
+                                    transcript=meeting_context,
+                                    question=question
+                                )
+                                
+                                st.markdown("**Answer:**")
+                                st.markdown(answer)
+                                
+                            except Exception as e:
+                                st.error(f"Error: {e}")
         
     except Exception as e:
         st.error(f"Error loading meetings: {e}")
+        import traceback
+        st.code(traceback.format_exc())
 
 def action_items_page():
     """View and manage action items"""
