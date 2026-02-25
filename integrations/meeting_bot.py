@@ -55,8 +55,8 @@ class MeetingConfig:
     mute_on_join: bool = True  # Mute microphone on join
     disable_camera: bool = True  # Disable camera on join
     audio_device: Optional[int] = None  # Audio device index (None = default)
-    audio_device: Optional[int] = None  # Audio device index (None = default)
-    device_index: int = None  # Audio device index (None = default)
+    headless: bool = True  # Run browser in headless mode (invisible)
+    bot_name: str = "AI Meeting Assistant Bot"  # Name to use when joining
 
 
 class AudioBuffer:

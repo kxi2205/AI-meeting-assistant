@@ -352,7 +352,7 @@ def join_live_meeting(url, platform, duration, title, participants_str):
         platform=platform,
         duration_minutes=duration,
         audio_device=device_index,
-        headless=True,  # Run in background
+        headless=True,
         bot_name="AI Meeting Assistant Bot"
     )
     
