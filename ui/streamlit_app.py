@@ -361,23 +361,12 @@ def join_live_meeting(url, platform, duration, title, participants_str):
         
         # Create a container for live updates
         status_container = st.empty()
-        progress_bar = st.progress(0)
         
         with status_container.container():
             st.markdown("### 🔄 Bot Status")
-            st.write("🤖 Bot starting in background (invisible mode)...")
+            st.write("🤖 Bot starting... connecting to meeting...")
             if device_index is not None:
                 st.write(f"🎤 Audio device: Index {device_index}")
-            st.success(f"""
-            **✅ Bot is completely automated!**
-            - Running in background (invisible)
-            - Auto-joining as "{config.bot_name}"
-            - Camera/mic off automatically
-            - Real-time transcription active
-            - Duration: {duration} minutes
-            
-            **No actions needed - fully automatic!**
-            """)
         
         # Run meeting bot in a separate thread to avoid asyncio conflicts
         import asyncio
@@ -407,28 +396,96 @@ def join_live_meeting(url, platform, duration, title, participants_str):
         bot_thread = threading.Thread(target=run_bot, daemon=True)
         bot_thread.start()
         
-        # Add stop button placeholder
+        # Placeholders for dynamic UI elements
         stop_placeholder = st.empty()
+        timer_placeholder = st.empty()
         
-        # Wait for completion with timeout
+        # Phase 1: Wait for bot to actually join the meeting
+        join_wait_start = time.time()
+        join_timeout = 120  # 2 minutes to join
+        bot_joined = False
+        
+        while bot_thread.is_alive() and (time.time() - join_wait_start) < join_timeout:
+            # Check if bot has joined
+            if bot_instance[0] and getattr(bot_instance[0], 'meeting_active', False):
+                bot_joined = True
+                break
+            
+            # Check if bot errored out before joining
+            if not result_queue.empty():
+                break
+            
+            time.sleep(0.5)
+        
+        if not bot_joined:
+            # Bot didn't join - check for errors
+            try:
+                status, result = result_queue.get(timeout=2)
+                if status == 'error':
+                    raise result
+            except Exception as e:
+                if not isinstance(e, Exception) or str(e) == '':
+                    st.error("❌ Bot could not join the meeting within the timeout period.")
+                else:
+                    raise
+            return
+        
+        # Phase 2: Bot has joined! Show the active meeting UI
+        join_time = time.time()
+        
+        with status_container.container():
+            st.success(f"""
+            **✅ Bot has joined the meeting!**
+            - Running as "{config.bot_name}"
+            - Camera/mic off, browser muted
+            - Real-time transcription active
+            - Max duration: {duration} minutes
+            """)
+        
+        # Wait for completion with live timer and stop button
         max_wait = (duration * 60) + 120  # Duration + 2 min buffer
-        start_time = time.time()
         
-        while bot_thread.is_alive() and (time.time() - start_time) < max_wait:
-            elapsed = int(time.time() - start_time)
-            progress = min(int((elapsed / (duration * 60)) * 100), 99)
-            progress_bar.progress(progress)
+        while bot_thread.is_alive() and (time.time() - join_time) < max_wait:
+            elapsed_seconds = int(time.time() - join_time)
+            hours = elapsed_seconds // 3600
+            minutes = (elapsed_seconds % 3600) // 60
+            seconds = elapsed_seconds % 60
+            
+            if hours > 0:
+                timer_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+            else:
+                timer_str = f"{minutes:02d}:{seconds:02d}"
+            
+            # Show live timer
+            timer_placeholder.markdown(
+                f"### ⏱️ Bot in meeting: **{timer_str}**"
+            )
             
             # Show stop button
             with stop_placeholder:
-                if st.button("🛑 Stop Bot & Leave Meeting", key=f"stop_bot_{elapsed}"):
+                if st.button("🛑 Stop Bot & Leave Meeting", key=f"stop_bot_{elapsed_seconds}"):
                     if bot_instance[0]:
                         bot_instance[0].stop()
+                        timer_placeholder.markdown(f"### ⏱️ Meeting ended after **{timer_str}**")
                         st.warning("🛑 Stopping bot... Please wait.")
                         time.sleep(3)
                         break
             
             time.sleep(1)
+        
+        # Clear dynamic elements
+        stop_placeholder.empty()
+        
+        # Final timer display
+        final_elapsed = int(time.time() - join_time)
+        final_h = final_elapsed // 3600
+        final_m = (final_elapsed % 3600) // 60
+        final_s = final_elapsed % 60
+        if final_h > 0:
+            final_timer = f"{final_h:02d}:{final_m:02d}:{final_s:02d}"
+        else:
+            final_timer = f"{final_m:02d}:{final_s:02d}"
+        timer_placeholder.markdown(f"### ⏱️ Meeting ended after **{final_timer}**")
         
         # Get result
         try:
@@ -440,8 +497,6 @@ def join_live_meeting(url, platform, duration, title, participants_str):
         
         if status == 'error':
             raise result
-        
-        progress_bar.progress(100)
         
         st.success("✅ Meeting bot has left the meeting!")
         
