@@ -219,6 +219,7 @@ class MeetingBot:
                 '--use-fake-device-for-media-stream',  # Use fake audio/video
                 '--disable-blink-features=AutomationControlled',  # Hide automation
                 '--autoplay-policy=no-user-gesture-required',  # Allow audio autoplay
+                '--mute-audio',  # Mute browser audio output to prevent echo
             ]
         )
         
@@ -231,6 +232,26 @@ class MeetingBot:
         self.page = await context.new_page()
         print("✅ Browser launched successfully")
     
+    async def _minimize_browser(self):
+        """Minimize the browser window after joining the meeting"""
+        try:
+            # Use CDP to minimize the window
+            cdp = await self.page.context.new_cdp_session(self.page)
+            window_info = await cdp.send("Browser.getWindowForTarget")
+            window_id = window_info["windowId"]
+            await cdp.send("Browser.setWindowBounds", {
+                "windowId": window_id,
+                "bounds": {"windowState": "minimized"}
+            })
+            print("  ✓ Browser window minimized")
+        except Exception as e:
+            # Fallback: move window off-screen
+            try:
+                await self.page.evaluate("window.moveTo(-10000, -10000)")
+                print("  ✓ Browser window moved off-screen")
+            except:
+                print(f"  ⚠️  Could not minimize browser: {e}")
+
     async def _join_meeting_by_platform(self):
         """Route to platform-specific join logic"""
         if self.config.platform.lower() == "zoom":
@@ -306,6 +327,9 @@ class MeetingBot:
             self.meeting_active = True
             print("✅ Successfully joined Zoom meeting")
             
+            # Minimize browser window to keep it out of the way
+            await self._minimize_browser()
+            
         except Exception as e:
             print(f"❌ Failed to join Zoom meeting: {e}")
             raise
@@ -377,6 +401,9 @@ class MeetingBot:
             
             self.meeting_active = True
             print("✅ Successfully joined Google Meet")
+            
+            # Minimize browser window to keep it out of the way
+            await self._minimize_browser()
             
         except Exception as e:
             print(f"❌ Failed to join Google Meet: {e}")
