@@ -28,9 +28,12 @@ wheels/
 # Virtual Environment
 venv/
 env/
+.env/
 ENV/
+.venv/
 env.bak/
 venv.bak/
+.venv.bak/
 
 # IDE
 .vscode/
@@ -66,12 +69,14 @@ models/
 .coverage
 htmlcov/
 
-# Temporary files
+# Temporary and Browser files
 *.tmp
 *.bak
 *.backup
 temp/
 tmp/
+.bot_chrome_profile/
+.playwright/
 
 # Audio files (optional - uncomment if you don't want to commit audio)
 # *.mp3

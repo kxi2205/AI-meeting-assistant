@@ -6,6 +6,8 @@ from chromadb.config import Settings
 import config.settings as settings
 from sentence_transformers import SentenceTransformer
 
+from chromadb.utils import embedding_functions
+
 class VectorStore:
     """Manages vector storage and retrieval using ChromaDB"""
     
@@ -18,15 +20,18 @@ class VectorStore:
             path=str(settings.CHROMADB_DIR)
         )
         
-        # Get or create collection
-        self.collection = self.client.get_or_create_collection(
-            name="meeting_transcripts",
-            metadata={"description": "Meeting transcripts for semantic search"}
+        # Create embedding function for ChromaDB
+        print(f"Loading embedding model: {settings.EMBEDDING_MODEL}...")
+        self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
+            model_name=settings.EMBEDDING_MODEL
         )
         
-        # Load embedding model
-        print(f"Loading embedding model: {settings.EMBEDDING_MODEL}...")
-        self.embedding_model = SentenceTransformer(settings.EMBEDDING_MODEL)
+        # Get or create collection with the embedding function
+        self.collection = self.client.get_or_create_collection(
+            name="meeting_transcripts",
+            embedding_function=self.embedding_function,
+            metadata={"description": "Meeting transcripts for semantic search", "hnsw:space": "cosine"}
+        )
         
         print("✓ Vector Store initialized")
     

@@ -309,9 +309,18 @@ Network:
    - Sign up: [mongodb.com/cloud/atlas](https://www.mongodb.com/cloud/atlas)
 
 3. **FFmpeg** (Audio Processing)
-   - Version: 8.0.1+
-   - License: LGPL/GPL
+   - Purpose: Format conversion & Whisper ASR support
    - Install: Package manager or official site
+   - Note: The project also includes `imageio-ffmpeg` as an internal fallback.
+
+4. **Web Browser** (Meeting Bot)
+   - Chromium (installed via Playwright)
+   - Used for automated Zoom/Google Meet joining.
+
+5. **Audio Loopback** (Live Capture)
+   - **Windows**: "Stereo Mix" or "VB-Audio Cable"
+   - **macOS**: "BlackHole" or "Loopback"
+   - Required for capturing meeting audio directly from the system.
 
 ---
 
@@ -357,6 +366,9 @@ pip install --upgrade pip
 
 # Install all requirements
 pip install -r requirements.txt
+
+# Install Playwright browsers (Required for Meeting Bot)
+playwright install chromium
 ```
 
 **Dependency Installation Details:**
@@ -371,16 +383,18 @@ pip install -r requirements.txt
 
 ### Step 4: Install FFmpeg
 
+FFmpeg is essential for processing various audio formats and supporting the Whisper transcription engine.
+
 **Windows (using winget):**
 ```powershell
 winget install --id Gyan.FFmpeg -e --source winget
-# Restart terminal after installation
+# IMPORTANT: Restart terminal after installation
 ```
 
 **Windows (manual):**
 1. Download from [ffmpeg.org/download.html](https://ffmpeg.org/download.html)
 2. Extract to `C:\ffmpeg`
-3. Add `C:\ffmpeg\bin` to PATH
+3. Add `C:\ffmpeg\bin` to your System PATH variables.
 
 **macOS:**
 ```bash
@@ -396,8 +410,11 @@ sudo apt install ffmpeg
 **Verify Installation:**
 ```bash
 ffmpeg -version
-# Should show: ffmpeg version 8.0.1 or higher
+# Should show version 8.0.1 or higher
 ```
+
+> [!TIP]
+> **FFmpeg Troubleshooting**: If you get "FFmpeg not found" despite installing it, verify that `ffmpeg.exe` is in your PATH. On Windows, you may need to run `$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")` in PowerShell to refresh the path without a restart.
 
 ### Step 5: Get API Keys
 
@@ -455,42 +472,19 @@ touch .env
 **Add configuration:**
 
 ```env
-# =============================================================================
-# REQUIRED SETTINGS
-# =============================================================================
+# Bot Identity
+BOT_NAME=MeetAI
 
-# Groq API Key (Get from https://console.groq.com)
-GROQ_API_KEY=gsk_your_api_key_here
+# Audio Capture (Set to your loopback device index if needed)
+# Use `python integrations/audio_device_helper.py` to find indices
+# WHISPER_DEVICE=cpu
 
-# MongoDB Connection (Get from MongoDB Atlas)
-MONGODB_URI=mongodb+srv://username:password@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority
-MONGODB_DB_NAME=meeting_assistant
-
-# =============================================================================
-# OPTIONAL SETTINGS (Uncomment to customize)
-# =============================================================================
-
-# Whisper Configuration
-# Models: tiny (39M), base (74M), small (244M), medium (769M), large-v3 (1550M)
-# WHISPER_MODEL=base
-# WHISPER_DEVICE=cpu  # or cuda for GPU
-
-# Groq LLM Configuration
-# Models: llama-3.3-70b-versatile, llama-3.1-8b-instant, mixtral-8x7b-32768
-# GROQ_MODEL=llama-3.3-70b-versatile
-# GROQ_TEMPERATURE=0.7  # 0.0-1.0 (lower = more deterministic)
-# GROQ_MAX_TOKENS=2000  # Max response length
-
-# RAG Configuration
-# CHUNK_SIZE=1000  # Characters per chunk
-# CHUNK_OVERLAP=200  # Overlap between chunks
-# EMBEDDING_MODEL=all-MiniLM-L6-v2
-
-# Audio Processing
-# MAX_AUDIO_SIZE_MB=100  # Maximum upload size
-
-# Logging
-# LOG_LEVEL=INFO  # DEBUG, INFO, WARNING, ERROR
+# SMTP Configuration (For meeting summaries)
+SMTP_SERVER=smtp.gmail.com
+SMTP_PORT=587
+SENDER_EMAIL=your-email@gmail.com
+SENDER_PASSWORD=your-app-password
+```
 ```
 
 ### Step 7: Run the Application
@@ -575,10 +569,12 @@ ai-meeting-assistant/
 ├── 📂 ui/
 │   ├── __init__.py
 │   └── streamlit_app.py               # Web interface (1.32.2)
-│                                      # Pages:
-│                                      # 1. New Meeting: Upload + process
-│                                      # 2. Past Meetings: Browse + Q&A
-│                                      # 3. Action Items: Task tracking
+│
+├── 📂 integrations/                 # External Integrations & Bot
+│   ├── __init__.py
+│   ├── meeting_bot.py                 # Playwright bot for Zoom/Meet
+│   ├── email_sender.py                # SMTP summary dispatcher
+│   └── audio_device_helper.py         # Loopback device discovery
 │
 ├── 📂 data/                           # Auto-generated data directory
 │   ├── meetings/                      # Uploaded audio files
@@ -640,6 +636,15 @@ ai-meeting-assistant/
   - Cached model loading with `@st.cache_resource`
   - Real-time progress tracking
   - Session state management
+
+- **`integrations/meeting_bot.py`**: Playwright-based meeting automation
+  - Handles joining Zoom and Google Meet
+  - Captures real-time audio from system loopback
+  - Scrapes participants and sends chat notifications
+
+- **`integrations/email_sender.py`**: SMTP client for summarization
+  - Sends HTML-formatted meeting notes to participants
+  - Includes summary and prioritized action items
 
 ---
 
@@ -725,6 +730,47 @@ Answer Generated
    - 🟢 Low priority
    - 👤 Owner assigned
    - 📅 Deadline
+
+---
+
+## 🤖 Automated Live Meeting Bot
+
+This feature allows the assistant to join live Google Meet or Zoom sessions, capture audio in real-time, and generate immediate transcriptions and summaries.
+
+### 1. Setup & Authentication
+
+The bot uses **Playwright** with a persistent browser profile to stay logged in to your Google account.
+
+1. **Install Browsers**:
+   ```bash
+   playwright install chromium
+   ```
+2. **Initial Login**:
+   - Run the application and start a "Live Meeting".
+   - The first time you join a Google Meet, a browser window will open.
+   - **Manually log in** to your Google account.
+   - The session will be saved in `data/bot_chrome_profile` for all future meetings.
+
+### 2. Audio Capture Configuration
+
+To capture meeting audio without recording your own room's silence, you must use a **Virtual Loopback** device.
+
+**Windows (Recommended)**:
+1. Enable **"Stereo Mix"** in Sound Settings > Input.
+2. Or install [VB-Audio Virtual Cable](https://vb-audio.com/Cable/).
+3. Set the cable as your default playback and then use it as the bot's input.
+
+**macOS**:
+- Install [BlackHole](https://github.com/ExistentialAudio/BlackHole) (Free/Open Source).
+- Create a "Multi-Output Device" in Audio MIDI Setup.
+
+### 3. Bot Features
+
+- **Stealth Mode**: Uses anti-detection headers to join as a regular participant.
+- **Auto-Mute**: Automatically mutes the bot's microphone and disables the camera on join.
+- **Chat Disclaimer**: Sends a legal notification in the meeting chat: *"SYSTEM: AI Meeting Assistant has joined. This session is being recorded for automated transcription."*
+- **Participant Scraping**: Automatically identifies and scrapes names of participants from the UI every 60 seconds.
+- **Graceful Exit**: Detects when the meeting ends or when the host removes the bot.
 
 ---
 
@@ -1047,6 +1093,37 @@ def call_groq_with_retry(prompt, max_retries=3):
             else:
                 raise
 ```
+
+#### 8. "Bot fails to join meeting"
+
+**Diagnosis:**
+Check the terminal logs for Playwright errors.
+
+**Solutions:**
+- Run `playwright install chromium` to ensure browsers are installed.
+- Close any other Chromium instances that might be locking the profile directory.
+- Ensure you have an active internet connection.
+
+#### 9. "No audio detected in live meeting"
+
+**Diagnosis:**
+If the bot joins but transcription chunks are empty or silent.
+
+**Solutions:**
+- Verify your **Loopback** device is set correctly.
+- Run `python integrations/audio_device_helper.py` to see available devices and their indices.
+- In `.env`, set `AUDIO_DEVICE_INDEX` to the correct loopback device.
+- Ensure the meeting audio is actually playing through the loopback device.
+
+#### 10. "Google account login blocked"
+
+**Diagnosis:**
+Google prevents "automated" browsers from logging in.
+
+**Solutions:**
+- The bot uses `--disable-blink-features=AutomationControlled` to hide automation flags.
+- **Manual Login**: You MUST perform the first login manually in the browser window that the bot opens. once logged in, the session is saved in `.bot_chrome_profile`.
+- Do not use a brand new Google account; use one with some history if possible.
 
 ---
 

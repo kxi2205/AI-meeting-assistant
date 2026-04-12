@@ -3,6 +3,8 @@ Audio transcription using OpenAI Whisper
 """
 import whisper
 import torch
+import subprocess
+import os
 from pathlib import Path
 import config.settings as settings
 
@@ -23,6 +25,55 @@ class AudioTranscriber:
         print(f"Loading Whisper model: {self.model_name}...")
         self.model = whisper.load_model(self.model_name, device=self.device)
         print("✓ Whisper model loaded successfully")
+        
+        # Verify FFmpeg
+        self._verify_ffmpeg()
+
+    def _verify_ffmpeg(self):
+        """Check if FFmpeg is installed, otherwise transcription will fail"""
+        # 1. Try standard system path
+        try:
+            subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
+            print("✓ FFmpeg verification successful (System Path)")
+            return
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
+
+        # 2. Try hardcoded winget path
+        winget_bin = r"C:\Users\khush\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1-full_build\bin"
+        ffmpeg_exe = os.path.join(winget_bin, "ffmpeg.exe")
+        
+        if os.path.exists(ffmpeg_exe):
+            try:
+                # Add to path for this session
+                if winget_bin not in os.environ["PATH"]:
+                    os.environ["PATH"] += os.pathsep + winget_bin
+                
+                # Check if it works now
+                subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
+                print(f"✓ FFmpeg verified at winget location")
+                return
+            except:
+                pass
+
+        # 3. Try imageio-ffmpeg fallback
+        try:
+            import imageio_ffmpeg
+            ffmpeg_path = imageio_ffmpeg.get_ffmpeg_executable()
+            if ffmpeg_path:
+                print("ℹ️ Using imageio-ffmpeg as fallback...")
+                return
+        except ImportError:
+            pass
+
+        # 4. If all else fails, show the critical error instructions
+        print("\n" + "!"*60)
+        print("CRITICAL ERROR: FFmpeg not found!")
+        print("Whisper transcription requires FFmpeg to be installed.")
+        print("\nTO FIX (Windows):")
+        print("  1. Run this command in a new terminal:  winget install ffmpeg")
+        print("  2. Restart the app after installation.")
+        print("!"*60 + "\n")
     
     def transcribe_audio(self, audio_path, language=None):
         """

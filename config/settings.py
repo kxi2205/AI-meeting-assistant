@@ -14,9 +14,10 @@ DATA_DIR = BASE_DIR / "data"
 MEETINGS_DIR = DATA_DIR / "meetings"
 TRANSCRIPTS_DIR = DATA_DIR / "transcripts"
 CHROMADB_DIR = DATA_DIR / "chromadb"
+BROWSER_PROFILE_DIR = DATA_DIR / "bot_chrome_profile"
 
 # Create directories if they don't exist
-for directory in [DATA_DIR, MEETINGS_DIR, TRANSCRIPTS_DIR, CHROMADB_DIR]:
+for directory in [DATA_DIR, MEETINGS_DIR, TRANSCRIPTS_DIR, CHROMADB_DIR, BROWSER_PROFILE_DIR]:
     directory.mkdir(parents=True, exist_ok=True)
 
 # API Keys
@@ -25,8 +26,9 @@ MONGODB_URI = os.getenv("MONGODB_URI")
 MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "meeting_assistant")
 
 # Whisper Configuration
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")  # tiny, base, small, medium, large, large-v3
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "tiny")  # tiny, base, small, medium, large, large-v3
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")  # cpu or cuda
+WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "en") # Force English by default
 
 # Groq Configuration
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile")
@@ -36,7 +38,16 @@ GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS", "2000"))
 # RAG Configuration
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"  # sentence-transformers model
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+
+# Email Configuration (SMTP)
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SENDER_EMAIL = os.getenv("SENDER_EMAIL")
+SENDER_PASSWORD = os.getenv("SENDER_PASSWORD")
+
+# Bot Identity
+BOT_NAME = os.getenv("BOT_NAME", "MeetAI")
 
 # Audio Processing
 MAX_AUDIO_SIZE_MB = int(os.getenv("MAX_AUDIO_SIZE_MB", "100"))

@@ -69,10 +69,10 @@ def find_loopback_device() -> Optional[int]:
             device_name = device['name'].lower()
             for keyword in loopback_keywords:
                 if keyword in device_name:
-                    print(f"✅ Found loopback device: [{i}] {device['name']}")
+                    print(f"[FOUND] Loopback device: [{i}] {device['name']}")
                     return i
     
-    print("⚠️  No loopback device found")
+    print("[WARN] No loopback device found")
     return None
 
 
@@ -86,7 +86,7 @@ def test_device(device_index: int, duration: int = 3):
     """
     import numpy as np
     
-    print(f"\n🎤 Testing device {device_index} for {duration} seconds...")
+    print(f"\n[TESTING] Testing device {device_index} for {duration} seconds...")
     print("   (Speak or play audio to see if it's capturing)")
     
     try:
@@ -107,12 +107,12 @@ def test_device(device_index: int, duration: int = 3):
         print(f"   Avg amplitude: {avg_amplitude:.4f}")
         
         if max_amplitude > 0.01:
-            print("   ✅ Device is capturing audio!")
+            print("   [OK] Device is capturing audio!")
         else:
-            print("   ⚠️  No audio detected (silence)")
+            print("   [WARN] No audio detected (silence)")
         
     except Exception as e:
-        print(f"   ❌ Error testing device: {e}")
+        print(f"   [ERROR] Error testing device: {e}")
 
 
 def get_device_setup_instructions():
@@ -218,26 +218,26 @@ def interactive_setup():
     """
     Interactive CLI to help user configure audio device
     """
-    print("\n🎧 Meeting Bot Audio Setup Wizard")
+    print("\n[SETUP] Meeting Bot Audio Setup Wizard")
     print("="*60 + "\n")
     
     # List devices
     devices = list_audio_devices()
     
     if not devices:
-        print("❌ No input devices found!")
+        print("[ERROR] No input devices found!")
         return
     
     # Try to find loopback
     loopback_idx = find_loopback_device()
     
     if loopback_idx is not None:
-        print(f"\n✅ Recommended device: {loopback_idx}")
+        print(f"\n[RECOMMENDED] Recommended device: {loopback_idx}")
         test = input("\nTest this device? (y/n): ").lower()
         if test == 'y':
             test_device(loopback_idx)
     else:
-        print("\n⚠️  No virtual audio device found")
+        print("\n[WARN] No virtual audio device found")
         get_device_setup_instructions()
         
         print("\nAfter setting up a virtual audio device:")
