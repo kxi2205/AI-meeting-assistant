@@ -6,10 +6,10 @@ import sys
 from pathlib import Path
 from datetime import datetime
 import uuid
-
 # Add parent directory to path
 sys.path.append(str(Path(__file__).parent.parent))
 
+from integrations.bot_manager import bot_manager
 from audio_processing.transcriber import AudioTranscriber
 from agents.summary_agent import SummaryAgent
 from agents.action_item_agent import ActionItemAgent
@@ -317,6 +317,12 @@ def live_meeting_page():
     # Check if device is ready
     device_ready = AUDIO_AVAILABLE and st.session_state.get('selected_device_index') is not None
     
+    # Reconnect to active session if running
+    if bot_manager.is_running():
+        st.info("🔄 Active session detected in background. Reconnecting UI...")
+        join_live_meeting(None, None, None, None, None, reconnect=True)
+        return
+        
     # Join button
     if meeting_url:
         if url_valid and device_ready:
@@ -333,100 +339,127 @@ def live_meeting_page():
             st.error("❌ Invalid meeting URL. Please check the format.")
     else:
         st.info("👆 Enter a meeting URL above to start")
+        
+    # Check for latest transcript
+    import os
+    TRANSCRIPT_PATH = settings.TRANSCRIPTS_DIR / "live_meeting_latest.txt"
+    if os.path.exists(TRANSCRIPT_PATH):
+        st.markdown("---")
+        st.markdown("### Latest Meeting Transcript (Recovered)")
+        with open(TRANSCRIPT_PATH, "r", encoding="utf-8") as f:
+            st.text_area("Transcript", f.read(), height=300)
 
-def join_live_meeting(url, platform, duration, title, participants_str):
-    """Join live meeting with bot and process results"""
+def join_live_meeting(url, platform, duration, title, participants_str, reconnect=False):
+    """Join live meeting with bot and process results or reconnect to active one"""
     meeting_id = str(uuid.uuid4())[:8]
     
-    # Get audio device selection BEFORE any threading
-    # This avoids session state access issues
-    device_index = None
-    if AUDIO_AVAILABLE and 'selected_device_index' in st.session_state:
-        device_index = st.session_state['selected_device_index']
-    
-    # Create configuration BEFORE threading to avoid session state conflicts
-    config = MeetingConfig(
-        meeting_url=url,
-        platform=platform,
-        duration_minutes=duration,
-        audio_device=device_index,
-        headless=True,
-        bot_name="AI Meeting Assistant Bot"
-    )
+    # Placeholders for dynamic UI elements
+    status_container = st.empty()
+    stop_placeholder = st.empty()
+    timer_placeholder = st.empty()
     
     try:
-        st.info("Initializing automated assistant...")
-        
-        # Create a container for live updates
-        status_container = st.empty()
-        
-        with status_container.container():
-            st.markdown("### Assistant Status")
-            st.write("Connecting to session...")
-            if device_index is not None:
-                st.write(f"🎤 Audio device: Index {device_index}")
-        
-        # Run meeting bot in a separate thread to avoid asyncio conflicts
-        import asyncio
-        import queue as queue_module
-        import time
-        
-        result_queue = queue_module.Queue()
-        bot_instance = [None]  # Use list to store reference for stop control
-        
-        def run_bot():
-            try:
-                # Create new event loop for this thread
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+        if not reconnect:
+            # Get audio device selection BEFORE any threading
+            # This avoids session state access issues
+            device_index = None
+            if AUDIO_AVAILABLE and 'selected_device_index' in st.session_state:
+                device_index = st.session_state['selected_device_index']
+            
+            # Create configuration BEFORE threading to avoid session state conflicts
+            config = MeetingConfig(
+                meeting_url=url,
+                platform=platform,
+                duration_minutes=duration,
+                audio_device=device_index,
+                headless=True,
+                bot_name="MeetAI",
+                prompt_context=participants_str  # Pass names down to fix spelling mistakes in transcription!
+            )
+            
+            st.info("Initializing automated assistant...")
+            
+            with status_container.container():
+                st.markdown("### Assistant Status")
+                st.write("Connecting to session...")
+                if device_index is not None:
+                    st.write(f"🎤 Audio device: Index {device_index}")
+            
+            # Run meeting bot in a separate thread via bot_manager
+            import asyncio
+            import time
+            
+            # Extract dependencies from Streamlit session context BEFORE going multi-threaded
+            # Streamlit throws ScriptRunContext errors if 'st.session_state' is accessed directly inside a Thread
+            vs_ref = st.session_state.vector_store
+            sa_ref = st.session_state.summary_agent
+            aa_ref = st.session_state.action_agent
+            
+            def run_bot():
+                try:
+                    # Create new event loop for this thread
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    
+                    # Injected backend dependencies
+                    bot = MeetingBot(
+                        config=config, 
+                        db=db,
+                        vector_store=vs_ref,
+                        summary_agent=sa_ref,
+                        action_agent=aa_ref
+                    )
+                    bot_manager.bot_instance = bot  # Store reference
+                    result = loop.run_until_complete(bot.join_meeting())
+                    bot_manager.result_queue.put(('success', result))
+                except Exception as e:
+                    bot_manager.result_queue.put(('error', e))
+                finally:
+                    loop.close()
+            
+            # Start bot thread
+            bot_manager.start_bot(run_bot)
+            st.session_state.has_active_meeting = True
+            
+            # Phase 1: Wait for bot to actually join the meeting
+            join_wait_start = time.time()
+            join_timeout = 120  # 2 minutes to join
+            bot_joined = False
+            
+            while bot_manager.is_running() and (time.time() - join_wait_start) < join_timeout:
+                # Check if bot has joined
+                if bot_manager.bot_instance and getattr(bot_manager.bot_instance, 'meeting_active', False):
+                    bot_joined = True
+                    break
                 
-                # Create bot and run (config already created in main thread)
-                bot = MeetingBot(config)
-                bot_instance[0] = bot  # Store reference
-                result = loop.run_until_complete(bot.join_meeting())
-                result_queue.put(('success', result))
-            except Exception as e:
-                result_queue.put(('error', e))
-            finally:
-                loop.close()
-        
-        # Start bot thread
-        bot_thread = threading.Thread(target=run_bot, daemon=True)
-        bot_thread.start()
-        
-        # Placeholders for dynamic UI elements
-        stop_placeholder = st.empty()
-        timer_placeholder = st.empty()
-        
-        # Phase 1: Wait for bot to actually join the meeting
-        join_wait_start = time.time()
-        join_timeout = 120  # 2 minutes to join
-        bot_joined = False
-        
-        while bot_thread.is_alive() and (time.time() - join_wait_start) < join_timeout:
-            # Check if bot has joined
-            if bot_instance[0] and getattr(bot_instance[0], 'meeting_active', False):
-                bot_joined = True
-                break
+                # Check if bot errored out before joining
+                if not bot_manager.result_queue.empty():
+                    break
+                
+                time.sleep(0.5)
             
-            # Check if bot errored out before joining
-            if not result_queue.empty():
-                break
-            
-            time.sleep(0.5)
-        
-        if not bot_joined:
-            # Bot didn't join - check for errors
-            try:
-                status, result = result_queue.get(timeout=2)
-                if status == 'error':
-                    raise result
-            except Exception as e:
-                if not isinstance(e, Exception) or str(e) == '':
-                    st.error("❌ Bot could not join the meeting within the timeout period.")
-                else:
-                    raise
-            return
+            if not bot_joined:
+                # Bot didn't join - check for errors
+                try:
+                    status, result = bot_manager.result_queue.get(timeout=2)
+                    if status == 'error':
+                        raise result
+                except Exception as e:
+                    if not isinstance(e, Exception) or str(e) == '':
+                        st.error("❌ Bot could not join the meeting within the timeout period.")
+                    else:
+                        raise
+                return
+        else:
+            # Reconnect block
+            import time
+            max_wait = 180 # default
+            if bot_manager.bot_instance:
+                duration = bot_manager.bot_instance.config.duration_minutes
+                max_wait = (duration * 60) + 120
+                
+        # UI status block
+        status_box = st.status("Reconnecting to MeetingBot Pipeline..." if reconnect else "Initializing MeetingBot Pipeline...", expanded=True)
         
         # Phase 2: Bot has joined! Show the active meeting UI
         join_time = time.time()
@@ -442,7 +475,7 @@ def join_live_meeting(url, platform, duration, title, participants_str):
         # Wait for completion with live timer and stop button
         max_wait = (duration * 60) + 120  # Duration + 2 min buffer
         
-        while bot_thread.is_alive() and (time.time() - join_time) < max_wait:
+        while bot_manager.is_running() and (time.time() - join_time) < max_wait:
             elapsed_seconds = int(time.time() - join_time)
             hours = elapsed_seconds // 3600
             minutes = (elapsed_seconds % 3600) // 60
@@ -458,21 +491,46 @@ def join_live_meeting(url, platform, duration, title, participants_str):
                 f"### Session Duration: **{timer_str}**"
             )
             
+            # Poll status queue dynamically
+            while bot_manager.status_queue and not bot_manager.status_queue.empty():
+                evt = bot_manager.status_queue.get()
+                state = evt.get("state", "UNKNOWN")
+                detail = evt.get("detail", "")
+                
+                if state == "DONE":
+                    status_box.update(label=detail, state="complete")
+                    status_box.write(f"✅ **{state}**: {detail}")
+                elif state == "ERROR":
+                    status_box.update(label=detail, state="error")
+                else:
+                    status_box.update(label=f"[{state}] {detail}", state="running")
+                    status_box.write(f"🔄 **{state}**: {detail}")
+            
             # Show stop button
             with stop_placeholder:
                 if st.button("Terminate Session", key=f"stop_bot_{elapsed_seconds}", type="primary", use_container_width=True):
-                        bot_instance[0].stop()
+                        bot_manager.stop_bot()
                         timer_placeholder.markdown(f"### Finalizing after **{timer_str}**")
                         st.warning("🛑 Terminating assistant... Finalizing intelligence report in background.")
-                        # Do not break immediately; let the bot finish its cleanup
-                        time.sleep(2)
-                        break
+                        # Let the bot finish its cleanup gracefully
+                        pass
             
             # Check stop_event indirectly by checking thread or results
-            if not bot_thread.is_alive():
+            if not bot_manager.is_running():
                 break
 
             time.sleep(1)
+            
+        # Drain remaining status queue messages sequentially before final display
+        while bot_manager.status_queue and not bot_manager.status_queue.empty():
+            evt = bot_manager.status_queue.get()
+            state = evt.get("state", "UNKNOWN")
+            detail = evt.get("detail", "")
+            if state == "DONE":
+                status_box.update(label=detail, state="complete")
+                status_box.write(f"✅ **{state}**: {detail}")
+            else:
+                status_box.write(f"🔄 **{state}**: {detail}")
         
         # Clear dynamic elements
         stop_placeholder.empty()
@@ -490,13 +548,21 @@ def join_live_meeting(url, platform, duration, title, participants_str):
         
         # Get result with a much longer timeout
         try:
-            status, result = result_queue.get(timeout=60) # Increased from 5s to 60s
+            status, result = bot_manager.result_queue.get(timeout=60) # Increased from 5s to 60s
         except Exception as e:
-            st.warning("⚠️ Meeting bot takes longer than expected to finalize.")
-            st.info("The meeting has been terminated. Please check 'Meeting Archive' in 1-2 minutes for the final transcript and summary.")
-            return
-            st.warning("⚠️ Meeting bot stopped unexpectedly")
-            st.info("If the bot appeared in the meeting briefly, this is normal - it may have joined successfully but closed early.")
+            st.warning("⚠️ Background process detached from UI (This happens on manual terminate).")
+            import os
+            TRANSCRIPT_PATH = settings.TRANSCRIPTS_DIR / "live_meeting_latest.txt"
+            if os.path.exists(TRANSCRIPT_PATH):
+                with open(TRANSCRIPT_PATH, "r", encoding="utf-8") as f:
+                    transcript_text = f.read()
+                st.success("✅ Recovered latest transcript from disk!")
+                st.markdown("---")
+                st.markdown("### Session Transcript")
+                with st.expander("View Transcript", expanded=True):
+                    st.text_area("Transcript", transcript_text, height=300, key="recovered_live_transcript")
+            else:
+                st.info("No transcript file found yet. Wait a few seconds and refresh.")
             return
         
         if status == 'error':
@@ -504,117 +570,48 @@ def join_live_meeting(url, platform, duration, title, participants_str):
         
         st.success("✅ Meeting bot has left the meeting!")
         
-        # Get results
-        transcript_text = result['full_transcript']
+        # Display extracted results directly from the background payload
+        transcript_text = result.get('full_transcript', '')
+        cleaned_transcript = result.get('cleaned_transcript', '')
+        summary = result.get('summary', 'No summary generated.')
+        action_items = result.get('action_items', [])
         
-        # Display transcript
+        st.info("The intelligence extraction has completed perfectly. Please review the reports below and switch to the 'Meeting Archive' tab whenever you're ready.")
+        
+        # Display transcripts
         st.markdown("---")
         st.markdown("### Session Transcript")
-        with st.expander("View Transcript", expanded=True):
-            st.text_area("Transcript", transcript_text, height=300, key="live_transcript")
-            
-            # Show chunks info
-            st.caption(f"Transcribed in {result['total_chunks']} chunks")
+        tab1, tab2 = st.tabs(["Cleaned Transcript (Proper Nouns Corrected)", "Raw Transcript"])
+        with tab1:
+            st.text_area("Clean Transcript", cleaned_transcript, height=300, key="clean_transcript")
+        with tab2:
+            st.text_area("Raw", transcript_text, height=300, key="raw_transcript")
+            st.caption(f"Transcribed in {result.get('total_chunks', 0)} chunks")
         
-        # Generate summary
+        # Display Analytical Summary and Actions
         st.markdown("---")
-        with st.spinner("Generating analytical summary..."):
-            participants_list = [p.strip() for p in participants_str.split(',')] if participants_str else []
-            summary_result = st.session_state.summary_agent.generate_summary(
-                transcript_text,
-                meeting_context={
-                    'title': title or "Live Meeting",
-                    'date': datetime.now().strftime("%Y-%m-%d"),
-                    'participants': participants_list
-                }
-            )
-            summary = summary_result['summary']
-        
-        st.markdown("### Meeting Summary")
         with st.expander("Analytical Summary", expanded=True):
             st.markdown(summary)
-        
-        # Extract action items
-        with st.spinner("Extracting commitments and tasks..."):
-            action_items = st.session_state.action_agent.extract_action_items(transcript_text)
-        
+            
         if action_items:
             st.markdown("### Action Items")
             with st.expander(f"Identified Tasks ({len(action_items)})", expanded=True):
                 for i, item in enumerate(action_items, 1):
-                    # Priority mapping
-                    priority = item.get('priority', 'medium').upper()
-                    
-                    st.markdown(f"**{i}. {item['task']}**")
+                    confidence = str(item.get('confidence', 'medium')).upper()
+                    st.markdown(f"**{i}. {item.get('task', 'Unknown task')}**")
                     col1, col2, col3 = st.columns(3)
-                    col1.caption(f"Owner: {item.get('owner', 'Unassigned')}")
+                    col1.caption(f"Assignee: {item.get('assignee_name', 'Unassigned')}")
                     col2.caption(f"Deadline: {item.get('deadline', 'Not specified')}")
-                    col3.caption(f"Priority: {priority}")
+                    col3.caption(f"Confidence: {confidence}")
+                    if item.get('evidence'):
+                        st.caption(f"🔍 *Evidence: \"{item.get('evidence')}\"*")
                     st.divider()
-        
-        # Save to database
-        with st.spinner("💾 Saving to database..."):
-            meeting_data = {
-                "meeting_id": meeting_id,
-                "title": title or "Live Meeting",
-                "date": datetime.now().isoformat(),
-                "participants": participants_list if participants_str else [],
-                "transcript": transcript_text,
-                "summary": summary,
-                "duration": duration * 60,  # Convert to seconds
-                "meeting_url": url,
-                "platform": platform,
-                "meeting_type": "live_meeting",  # Track meeting type
-                "is_live_capture": True
-            }
-            db.save_meeting(meeting_data)
-            
-            # Save action items
-            for item in action_items:
-                item['meeting_id'] = meeting_id
-                db.save_action_item(item)
-            
-            # Save to vector store
-            st.session_state.vector_store.add_meeting(
-                meeting_id=meeting_id,
-                transcript=transcript_text,
-                metadata={
-                    "title": title or "Live Meeting",
-                    "date": datetime.now().strftime("%Y-%m-%d"),
-                    "participants": participants_str or ", ".join(result.get('participants', ['Unknown']))
-                }
-            )
 
-        # 5. AUTOMATIC DISPATCH
+        # 5. COMMUNICATION DISPATCH
         st.markdown("---")
         st.markdown("### Communication Dispatch")
-        
-        # Get bot participants (includes extracted emails)
-        bot_participants = result.get('participants', [])
-        all_participants = list(set(participants_list + bot_participants))
-        
-        # Filter for emails specifically
-        target_emails = [p for p in all_participants if "@" in p]
-        
-        if target_emails and st.session_state.email_sender and st.session_state.email_sender.enabled:
-            with st.status("Transmitting automated intelligence report...", expanded=True) as status:
-                st.write(f"Recipients identified: {', '.join(target_emails)}")
-                success = st.session_state.email_sender.send_meeting_summary(
-                    target_emails,
-                    summary,
-                    action_items,
-                    title or "Live Meeting"
-                )
-                if success:
-                    status.update(label="✅ Intelligence report successfully transmitted!", state="complete")
-                    st.success(f"Report sent to {len(target_emails)} recipients.")
-                else:
-                    status.update(label="❌ Transmission failure", state="error")
-                    st.error("Please verify SMTP configuration in .env.")
-        else:
-            st.info("No recipient emails identified for automatic dispatch. You can manually enter them below.")
-            dispatch_summary(summary, action_items, title or "Live Meeting", all_participants, transcript_text)
-        
+        st.info("Generation complete. Please review the reports below to verify and dispatch to your team.")
+        dispatch_summary(summary, action_items, title or "Live Meeting", participants_str, transcript_text)
     except Exception as e:
         st.error(f"❌ Error: {e}")
         st.markdown("**Troubleshooting:**")
@@ -645,31 +642,22 @@ def dispatch_summary(summary, action_items, title, initial_participants, transcr
 
     # 2. Recipient Verification
     if st.session_state.email_sender and st.session_state.email_sender.enabled:
-        with st.expander("Recipient Verification", expanded=True):
-            st.markdown("Verify the email addresses for extracted participants:")
+        with st.expander("Recipient Entry", expanded=True):
+            st.markdown("Enter recipient emails to distribute the intelligence report.")
             
-            # Create a list to store verified emails
             verified_emails = []
             
-            # Filter out empty names
-            initial_participants = [p for p in initial_participants if p and p.lower() != 'unknown' and p.lower() != 'guest']
+            # Default Host email if set
+            host_email = settings.SENDER_EMAIL or ""
             
-            # Map names to potential emails (host can edit)
-            for i, name in enumerate(initial_participants):
-                col1, col2 = st.columns([1, 2])
-                with col1:
-                    st.write(f"**{name}**")
-                with col2:
-                    email = st.text_input(
-                        f"Email for {name}", 
-                        value="", 
-                        placeholder="email@example.com",
-                        key=f"email_input_{name}_{i}"
-                    )
-                    if email:
-                        verified_emails.append(email.strip())
+            email_input = st.text_input(
+                "Host / Primary Email", 
+                value=host_email,
+                placeholder="host@example.com"
+            )
+            if email_input:
+                verified_emails.append(email_input.strip())
             
-            # Add an option for additional recipients
             other_emails = st.text_input(
                 "Additional Recipients", 
                 placeholder="colleague@example.com, manager@example.com",
@@ -854,6 +842,33 @@ def past_meetings_page():
     """View past meetings and ask questions"""
     st.header("Meeting Archive")
     
+    # Premium Dark Aurora / Glassmorphism overriding styles for the Archive page
+    st.markdown("""
+        <style>
+        /* Targeting Expander blocks for a deeper glass look */
+        [data-testid="stExpander"] {
+            background: rgba(30, 35, 45, 0.4);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+        }
+        /* Make inner text glow slightly */
+        h3 {
+            background: -webkit-linear-gradient(45deg, #4da6ff, #99c2ff);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .transcript-line {
+            font-family: 'Inter', sans-serif;
+            color: #d1d5db;
+            line-height: 1.6;
+            padding-bottom: 8px;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+    
     try:
         meetings = db.get_all_meetings(limit=50)
         
@@ -864,9 +879,9 @@ def past_meetings_page():
         # Search and filter
         col1, col2 = st.columns([3, 1])
         with col1:
-            search_query = st.text_input("Search archives", placeholder="Search by title, participants...")
+            search_query = st.text_input("Search archives", placeholder="Search by title, participants...", label_visibility="collapsed")
         with col2:
-            filter_type = st.selectbox("Category", ["All", "Live Sessions", "Recordings"])
+            filter_type = st.selectbox("Category", ["All", "Live Sessions", "Recordings"], label_visibility="collapsed")
         
         # Apply filters
         filtered_meetings = meetings
@@ -880,82 +895,78 @@ def past_meetings_page():
         elif filter_type == "Recordings":
             filtered_meetings = [m for m in filtered_meetings if m.get('meeting_type') == 'uploaded_recording']
         
-        st.write(f"Found {len(filtered_meetings)} meeting(s)")
+        st.caption(f"Archived Sessions: {len(filtered_meetings)}")
+        st.markdown("<br>", unsafe_allow_html=True)
         
         # Display meetings
         for meeting in filtered_meetings:
-            # Meeting type badge
             meeting_type = meeting.get('meeting_type', 'uploaded_recording')
-            if meeting_type == 'live_meeting':
-                type_badge = "Live Session"
-            else:
-                type_badge = "Recording"
-            
-            # Expander title
-            title_text = f"{type_badge} | {meeting.get('title', 'Untitled')} - {meeting.get('date', '')[:10]}"
+            type_badge = "Live Session" if meeting_type == 'live_meeting' else "Recording"
+            title_text = f"🎙️ {meeting.get('title', 'Untitled')} | {meeting.get('date', '')[:10]}"
             
             with st.expander(title_text, expanded=False):
-                # Header row with delete button
+                # Header row with meta info and delete button
                 col1, col2 = st.columns([5, 1])
                 with col1:
-                    st.markdown(f"**📅 Date:** {meeting.get('date', 'Unknown')[:19]}")
-                    st.markdown(f"**👥 Participants:** {', '.join(meeting.get('participants', ['No participants'])) or 'Not specified'}")
-                    st.markdown(f"**⏱️ Duration:** {meeting.get('duration', 0):.1f} seconds")
-                    
-                    # Show meeting link for live meetings
-                    if meeting_type == 'live_meeting' and meeting.get('meeting_url'):
-                        st.markdown(f"**🔗 Meeting Link:** [{meeting.get('platform', 'Link')}]({meeting['meeting_url']})")
-                
+                    st.markdown(f"**📅 Date:** {meeting.get('date', 'Unknown')[:19]}  |  **👥 Team:** {', '.join(meeting.get('participants', ['No participants'])) or 'Not specified'}  |  **⏱️ Length:** {meeting.get('duration', 0):.1f}s")
                 with col2:
-                    if st.button("Delete", key=f"del_{meeting['meeting_id']}", type="secondary"):
+                    if st.button("🗑️ Delete", key=f"del_{meeting['meeting_id']}", type="secondary", use_container_width=True):
                         with st.spinner("Removing record..."):
                             db.delete_meeting(meeting['meeting_id'])
                             st.session_state.vector_store.delete_meeting(meeting['meeting_id'])
-                            st.success("Record removed")
                             st.rerun()
                 
                 st.divider()
                 
-                # Summary Section
-                with st.container():
-                    st.markdown("### Summary")
-                    summary_text = meeting.get('summary', 'No summary available')
-                    st.markdown(summary_text)
+                # 1. Cleaned Transcript Layout FIRST (Auto-Scrolling Box via st.container height)
+                st.markdown("### Cleaned Transcript")
+                st.caption("Proper nouns corrected & grammatically structured.")
+                clean_t = meeting.get('transcript', 'No cleaned transcript available (Old meeting format).')
                 
-                st.divider()
+                # Use a strictly defined height container to simulate auto-scrolling
+                with st.container(height=250, border=True):
+                    # We render this as simple markdown to retain structural paragraphing
+                    st.markdown(f"<div class='transcript-line'>{clean_t}</div>", unsafe_allow_html=True)
                 
-                # Action Items Section
-                with st.container():
+                st.markdown("<br>", unsafe_allow_html=True)
+                col_sum, col_act = st.columns([1, 1])
+                
+                # 2. Summary Block
+                with col_sum:
+                    st.markdown("### Analytical Summary")
+                    with st.container(border=True):
+                        st.markdown(meeting.get('summary', 'No summary generated.'))
+                
+                # 3. Action Items Block
+                with col_act:
                     st.markdown("### Action Items")
-                    actions = db.get_action_items(meeting_id=meeting['meeting_id'])
+                    with st.container(border=True):
+                        actions = db.get_action_items(meeting_id=meeting['meeting_id'])
+                        if actions:
+                            for idx, item in enumerate(actions, 1):
+                                priority = item.get('priority', 'medium').upper()
+                                assignee = item.get('assignee_name', 'Unassigned')
+                                confidence = str(item.get('confidence', 'medium')).upper()
+                                
+                                st.markdown(f"**{idx}. {item['task']}**")
+                                st.caption(f"👤 {assignee} | 🎯 Confidence: {confidence}")
+                        else:
+                            st.info("No direct action items identified.")
+                
+                # 4. Hidden Raw Transcript
+                st.markdown("<br>", unsafe_allow_html=True)
+                with st.expander("🛠️ View Audio-Chunk Raw Transcript (Debug)"):
+                    raw_text = meeting.get('raw_transcript', meeting.get('transcript', 'Unavailable.'))
+                    st.text_area("Raw Stream Output", raw_text, height=150, key=f"raw_transcript_{meeting['meeting_id']}", label_visibility="collapsed")
                     
-                    if actions:
-                        for idx, item in enumerate(actions, 1):
-                            priority = item.get('priority', 'medium').upper()
-                            status = item.get('status', 'pending').upper()
-                            
-                            st.markdown(f"{idx}. [{status}] **{item['task']}** - {item.get('owner', 'Unassigned')} (Deadline: {item.get('deadline', 'N/A')})")
-                    else:
-                        st.info("No action items for this meeting")
-                
-                st.divider()
-                
-                # Transcript Section
-                with st.container():
-                    st.markdown("### Transcript")
-                    transcript_text = meeting.get('transcript', 'No transcript available')
-                    st.text_area("Session Transcript", transcript_text, height=200, key=f"transcript_{meeting['meeting_id']}", label_visibility="collapsed")
-                
                 st.divider()
                 
                 # Ask Questions Section
                 with st.container():
                     st.markdown("### Session Intelligence")
-                    st.caption("Ask specific questions regarding this session")
-                    
                     question = st.text_input(
-                        "Inquiry", 
-                        placeholder="What were the primary decisions?",
+                        "Ask the LLM specifically about this meeting's context:", 
+                        placeholder="e.g. 'What was the final decision on the marketing budget?'",
                         key=f"q_{meeting['meeting_id']}"
                     )
                     

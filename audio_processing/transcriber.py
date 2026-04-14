@@ -1,117 +1,83 @@
 """
-Audio transcription using OpenAI Whisper
+Audio transcription using Groq Cloud Whisper API
 """
-import whisper
-import torch
-import subprocess
 import os
 from pathlib import Path
+from groq import Groq
 import config.settings as settings
 
 class AudioTranscriber:
-    """Handles audio transcription using Whisper"""
+    """Handles audio transcription using Groq Whisper API"""
     
-    def __init__(self, model_name=None, device=None):
+    def __init__(self, model_name="whisper-large-v3", device=None):
         """
         Initialize the transcriber
         
         Args:
-            model_name: Whisper model size (tiny, base, small, medium, large, large-v3)
-            device: Device to run on (cpu, cuda)
+            model_name: Groq whisper model (default: whisper-large-v3)
+            device: Ignored, kept for API compatibility with old transcriber
         """
-        self.model_name = model_name or settings.WHISPER_MODEL
-        self.device = device or settings.WHISPER_DEVICE
+        self.model_name = model_name
         
-        print(f"Loading Whisper model: {self.model_name}...")
-        self.model = whisper.load_model(self.model_name, device=self.device)
-        print("✓ Whisper model loaded successfully")
+        print(f"Loading Groq Whisper client for model: {self.model_name}...")
         
-        # Verify FFmpeg
-        self._verify_ffmpeg()
-
-    def _verify_ffmpeg(self):
-        """Check if FFmpeg is installed, otherwise transcription will fail"""
-        # 1. Try standard system path
-        try:
-            subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
-            print("✓ FFmpeg verification successful (System Path)")
-            return
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            pass
-
-        # 2. Try hardcoded winget path
-        winget_bin = r"C:\Users\khush\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1-full_build\bin"
-        ffmpeg_exe = os.path.join(winget_bin, "ffmpeg.exe")
+        if not settings.GROQ_API_KEY:
+            raise ValueError("GROQ_API_KEY not found in environment variables")
+            
+        self.client = Groq(
+            api_key=settings.GROQ_API_KEY,
+            max_retries=3
+        )
         
-        if os.path.exists(ffmpeg_exe):
-            try:
-                # Add to path for this session
-                if winget_bin not in os.environ["PATH"]:
-                    os.environ["PATH"] += os.pathsep + winget_bin
-                
-                # Check if it works now
-                subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
-                print(f"✓ FFmpeg verified at winget location")
-                return
-            except:
-                pass
+        self.ffmpeg_available = True  # We don't need local FFmpeg anymore for native Python fallback to matter
+        print("✓ Groq Audio API initialized successfully")
 
-        # 3. Try imageio-ffmpeg fallback
-        try:
-            import imageio_ffmpeg
-            ffmpeg_path = imageio_ffmpeg.get_ffmpeg_executable()
-            if ffmpeg_path:
-                print("ℹ️ Using imageio-ffmpeg as fallback...")
-                return
-        except ImportError:
-            pass
-
-        # 4. If all else fails, show the critical error instructions
-        print("\n" + "!"*60)
-        print("CRITICAL ERROR: FFmpeg not found!")
-        print("Whisper transcription requires FFmpeg to be installed.")
-        print("\nTO FIX (Windows):")
-        print("  1. Run this command in a new terminal:  winget install ffmpeg")
-        print("  2. Restart the app after installation.")
-        print("!"*60 + "\n")
-    
-    def transcribe_audio(self, audio_path, language=None):
+    def transcribe_audio(self, audio_path, language=None, prompt=""):
         """
         Transcribe audio file to text
         
         Args:
             audio_path: Path to audio file
             language: Language code (e.g., 'en', 'es'). None for auto-detect
+            prompt: Text to guide transcription (useful for proper nouns and context)
         
         Returns:
             dict: Transcription results with text, segments, and metadata
         """
         try:
-            print(f"Transcribing: {audio_path}")
+            print(f"Transcribing via Groq Cloud: {audio_path}")
             
-            # Transcribe
-            result = self.model.transcribe(
-                str(audio_path),
-                language=language,
-                verbose=False
-            )
+            # Setup optional kwargs based on API spec
+            kwargs = {
+                "model": self.model_name,
+                "response_format": "verbose_json",
+            }
+            if language and language != "auto":
+                kwargs["language"] = language
+            if prompt and prompt.strip():
+                kwargs["prompt"] = prompt.strip()
+            
+            # Use Groq API
+            with open(str(audio_path), "rb") as file:
+                kwargs["file"] = (os.path.basename(audio_path), file.read())
+                response = self.client.audio.transcriptions.create(**kwargs)
             
             # Extract key information
             transcription = {
-                'text': result['text'].strip(),
-                'language': result.get('language', 'unknown'),
-                'segments': result.get('segments', []),
-                'duration': result.get('segments', [{}])[-1].get('end', 0) if result.get('segments') else 0
+                'text': response.text.strip(),
+                'language': getattr(response, 'language', 'unknown'),
+                'segments': getattr(response, 'segments', []),
+                'duration': getattr(response, 'duration', 0)
             }
             
             # Save transcript to file
             self._save_transcript(audio_path, transcription['text'])
             
-            print(f"✓ Transcription complete ({len(transcription['text'])} characters)")
+            print(f"✓ Cloud Transcription complete ({len(transcription['text'])} characters)")
             return transcription
             
         except Exception as e:
-            print(f"❌ Transcription error: {e}")
+            print(f"❌ Groq Transcription error: {e}")
             raise
     
     def _save_transcript(self, audio_path, text):
@@ -128,6 +94,6 @@ class AudioTranscriber:
         """Get information about the loaded model"""
         return {
             'model_name': self.model_name,
-            'device': self.device,
-            'parameters': sum(p.numel() for p in self.model.parameters())
+            'device': "cloud (Groq)",
+            'parameters': "N/A"
         }

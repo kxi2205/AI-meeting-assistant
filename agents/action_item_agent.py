@@ -40,17 +40,19 @@ TRANSCRIPT:
 
 For each action item, provide:
 - task: Clear description of what needs to be done
-- owner: Person responsible (use "Unassigned" if not mentioned)
+- assignee_name: Person responsible (use "Unassigned" if not mentioned, do not guess)
 - deadline: When it's due (use "Not specified" if not mentioned)
-- priority: high, medium, or low (infer from context)
+- confidence: high, medium, or low based on how explicit the task was
+- evidence: A short quote from the transcript providing evidence
 
 Return ONLY a valid JSON array of action items in this exact format:
 [
   {{
     "task": "Description of task",
-    "owner": "Person name",
+    "assignee_name": "Person name or 'Unassigned'",
     "deadline": "Date or timeframe",
-    "priority": "high/medium/low"
+    "confidence": "high/medium/low",
+    "evidence": "Direct quote from transcript"
   }}
 ]
 
@@ -113,7 +115,7 @@ If no action items are found, return an empty array: []"""
             categorized['by_priority'][priority].append(item)
             
             # By owner
-            owner = item.get('owner', 'Unassigned')
+            owner = item.get('assignee_name', 'Unassigned')
             if owner not in categorized['by_owner']:
                 categorized['by_owner'][owner] = []
             categorized['by_owner'][owner].append(item)

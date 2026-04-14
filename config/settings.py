@@ -14,10 +14,9 @@ DATA_DIR = BASE_DIR / "data"
 MEETINGS_DIR = DATA_DIR / "meetings"
 TRANSCRIPTS_DIR = DATA_DIR / "transcripts"
 CHROMADB_DIR = DATA_DIR / "chromadb"
-BROWSER_PROFILE_DIR = DATA_DIR / "bot_chrome_profile"
 
 # Create directories if they don't exist
-for directory in [DATA_DIR, MEETINGS_DIR, TRANSCRIPTS_DIR, CHROMADB_DIR, BROWSER_PROFILE_DIR]:
+for directory in [DATA_DIR, MEETINGS_DIR, TRANSCRIPTS_DIR, CHROMADB_DIR]:
     directory.mkdir(parents=True, exist_ok=True)
 
 # API Keys
@@ -51,6 +50,7 @@ BOT_NAME = os.getenv("BOT_NAME", "MeetAI")
 
 # Audio Processing
 MAX_AUDIO_SIZE_MB = int(os.getenv("MAX_AUDIO_SIZE_MB", "100"))
+FFMPEG_BINARY_PATH = os.getenv("FFMPEG_BINARY_PATH", None)
 
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

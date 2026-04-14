@@ -38,8 +38,10 @@ if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 from playwright.async_api import async_playwright, Page, Browser, TimeoutError as PlaywrightTimeout
+from playwright.async_api import async_playwright, Page, Browser, TimeoutError as PlaywrightTimeout
 from audio_processing.transcriber import AudioTranscriber
 import config.settings as settings
+from integrations.bot_manager import bot_manager
 
 
 @dataclass
@@ -50,13 +52,14 @@ class MeetingConfig:
     duration_minutes: int = 60  # Maximum meeting duration
     sample_rate: int = 16000  # Audio sample rate (Whisper expects 16kHz)
     channels: int = 1  # Mono audio
-    chunk_duration: int = 30  # Seconds of audio per transcription chunk
+    chunk_duration: int = 5  # Reduced from 30 to 5 seconds for fast termination
     auto_join: bool = True  # Automatically click "Join" button
     mute_on_join: bool = True  # Mute microphone on join
     disable_camera: bool = True  # Disable camera on join
     audio_device: Optional[int] = None  # Audio device index (None = default)
     headless: bool = True  # Run browser in headless mode (invisible)
     bot_name: str = settings.BOT_NAME  # Name to use when joining
+    prompt_context: str = ""  # Initial prompt for Whisper to learn proper noun spellings
 
 
 class AudioBuffer:
@@ -154,9 +157,21 @@ class MeetingBot:
     7. Detect meeting end and cleanup
     """
     
-    def __init__(self, config: MeetingConfig, transcriber: Optional[AudioTranscriber] = None):
+    def __init__(self, 
+                 config: MeetingConfig, 
+                 transcriber: Optional[AudioTranscriber] = None,
+                 db = None,
+                 vector_store = None,
+                 summary_agent = None,
+                 action_agent = None):
         self.config = config
         self.transcriber = transcriber or AudioTranscriber()
+        
+        # Injected background dependencies
+        self.db = db
+        self.vector_store = vector_store
+        self.summary_agent = summary_agent
+        self.action_agent = action_agent
         
         self.browser: Optional[Browser] = None
         self.page: Optional[Page] = None
@@ -170,6 +185,10 @@ class MeetingBot:
         self.stop_event = asyncio.Event()  # For instant stop signaling
         self.background_tasks: List[asyncio.Task] = []
         
+    def emit_status(self, state: str, detail: str = ""):
+        """Push a state string to the globally preserved singleton manager for UI consumption"""
+        bot_manager.push_status({"state": state, "detail": detail})
+        
     async def join_meeting(self):
         """
         Main entry point: Join meeting and start audio capture
@@ -177,6 +196,7 @@ class MeetingBot:
         Returns:
             dict: Meeting session info and transcription results
         """
+        self.emit_status("JOINING", "Connecting to session...")
         print(f"\n{'='*60}")
         print(f"MEETING BOT - Starting")
         print(f"{'='*60}")
@@ -214,15 +234,13 @@ class MeetingBot:
             await self._cleanup()
     
     async def _launch_browser(self):
-        """Launch Playwright browser with a persistent profile for Gmail persistence"""
-        print("🌐 Launching browser with persistent profile...")
+        """Launch Playwright browser for a guest join"""
+        print("🌐 Launching browser for guest meeting join...")
         
         playwright = await async_playwright().start()
         
-        # Use a persistent context to stay logged in to Gmail
-        # Note: Chromium must be visible (headless=False) for audio capture/UI
-        self.context = await playwright.chromium.launch_persistent_context(
-            user_data_dir=str(settings.BROWSER_PROFILE_DIR),
+        # Launch browser without persistence for reliability
+        self.browser = await playwright.chromium.launch(
             headless=False,
             args=[
                 '--use-fake-ui-for-media-stream',
@@ -230,13 +248,14 @@ class MeetingBot:
                 '--disable-blink-features=AutomationControlled',
                 '--autoplay-policy=no-user-gesture-required',
                 '--mute-audio',
-            ],
+            ]
+        )
+        self.context = await self.browser.new_context(
             permissions=['microphone', 'camera'],
             viewport={'width': 1280, 'height': 720}
         )
-        
-        self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
-        print(f"✅ Browser launched (Profile: {settings.BROWSER_PROFILE_DIR})")
+        self.page = await self.context.new_page()
+        print("✅ Browser launched (Incognito/Guest Mode)")
     
     async def _minimize_browser(self):
         """Minimize the browser window after joining the meeting"""
@@ -364,49 +383,61 @@ class MeetingBot:
                 print("  ⏳ Waiting for login... (60 seconds)")
                 await asyncio.sleep(60)  # Give user time to log in
             
-            # Fill in name field if present (for anonymous/guest join)
+            # Wait explicitly for the guest name input field
             try:
-                name_input = self.page.locator('input[placeholder*="name" i], input[aria-label*="name" i]').first
-                if await name_input.count() > 0:
-                    await name_input.fill(self.config.bot_name)
-                    print(f"  ✓ Entered identity: {self.config.bot_name}")
-                    await asyncio.sleep(1)
+                print("  ⏳ Waiting for name input field...")
+                name_input = self.page.locator('input[placeholder*="name" i], input[aria-label*="name" i]')
+                await name_input.first.wait_for(state="visible", timeout=15000)
+                await name_input.first.fill(self.config.bot_name)
+                print(f"  ✓ Entered identity: {self.config.bot_name}")
+                await asyncio.sleep(1)
             except Exception as e:
-                print(f"  ℹ️  No name field found (might be logged in): {e}")
+                print(f"  ℹ️ No name field found (might be logged in): {e}")
             
             # Disable camera
             if self.config.disable_camera:
                 try:
-                    camera_button = self.page.locator('button[aria-label*="camera" i][aria-label*="off" i]')
-                    if await camera_button.count() == 0:
-                        camera_button = self.page.locator('div[data-tooltip*="camera" i]')
-                    await camera_button.first.click(timeout=5000)
-                    print("  ✓ Camera disabled")
+                    camera_button = self.page.locator('button[aria-label*="camera" i][aria-label*="off" i], div[data-tooltip*="camera" i]')
+                    if await camera_button.count() > 0:
+                        await camera_button.first.click(timeout=5000)
+                        print("  ✓ Camera disabled")
                 except:
                     pass
             
             # Mute microphone
             if self.config.mute_on_join:
                 try:
-                    mic_button = self.page.locator('button[aria-label*="microphone" i][aria-label*="off" i]')
-                    if await mic_button.count() == 0:
-                        mic_button = self.page.locator('div[data-tooltip*="microphone" i]')
-                    await mic_button.first.click(timeout=5000)
-                    print("  ✓ Microphone muted")
+                    mic_button = self.page.locator('button[aria-label*="microphone" i][aria-label*="off" i], div[data-tooltip*="microphone" i]')
+                    if await mic_button.count() > 0:
+                        await mic_button.first.click(timeout=5000)
+                        print("  ✓ Microphone muted")
                 except:
                     pass
             
             await asyncio.sleep(2)
             
-            # Click "Join now" or "Ask to join"
-            join_button = self.page.locator('button:has-text("Join now"), button:has-text("Ask to join")')
-            await join_button.click()
-            print("  ✓ Clicked 'Join'")
+            # Click "Join now" or "Ask to join" using explicit waiting
+            try:
+                print("  ⏳ Waiting for Join button...")
+                join_button = self.page.locator('button:has-text("Join now"), button:has-text("Ask to join")')
+                await join_button.first.wait_for(state="visible", timeout=10000)
+                await join_button.first.click()
+                print("  ✓ Clicked 'Join' / 'Ask to join'")
+            except Exception as e:
+                print(f"  ⚠️ Could not click join button: {e}")
+                raise
             
-            await asyncio.sleep(5)
-            
-            self.meeting_active = True
-            print("✅ Successfully joined Google Meet")
+            # PROMPT 1: Wait conditions so it does not fail due to loading
+            print("  ⏳ Waiting to be admitted to the meeting...")
+            try:
+                # Wait for meeting controls to appear (signaling admission)
+                controls_locator = self.page.locator('button[aria-label*="Leave call" i], button[aria-label*="Turn off microphone" i], div[data-meeting-code]')
+                await controls_locator.first.wait_for(state="visible", timeout=60000)
+                self.meeting_active = True
+                print("✅ Successfully admitted to Google Meet")
+            except Exception as e:
+                print(f"❌ Failed to confirm admission to Google Meet: {e}")
+                raise
             
             # Minimize browser window to keep it out of the way
             await self._minimize_browser()
@@ -418,9 +449,12 @@ class MeetingBot:
     def _start_audio_capture(self):
         """
         Start capturing audio in real-time.
-        Prioritizes current output loopback (WASAPI) but falls back to default microphone.
+        Prioritizes VB-Cable (Virtual Audio Device) for unified clean routing, with default fallback.
         """
         print("\n🎤 Initializing audio capture sequence...")
+        print(f"   [Debug] Requested Sample Rate: {self.config.sample_rate} Hz")
+        print(f"   [Debug] Requested Channels: {self.config.channels}")
+        print(f"   [Debug] Max Chunk Duration: {self.config.chunk_duration} seconds")
         
         # Initialize audio buffer
         self.audio_buffer = AudioBuffer(
@@ -431,58 +465,64 @@ class MeetingBot:
         
         def audio_callback(indata, frames, time_info, status):
             if status:
-                print(f"  ⚠️  Audio status: {status}")
+                # Only print severe errors to avoid console spam on minor drops
+                if 'input overflow' in str(status).lower():
+                    print(f"  ⚠️  CRITICAL AUDIO DROPS: {status}")
+                pass 
             if self.is_recording:
                 self.audio_buffer.add_frames(indata.copy())
         
-        # Strategy 1: Try WASAPI loopback for current output
-        print("  🔍 Strategy 1: Attempting Active Output Loopback (WASAPI)...")
+        # Strategy 1: Explicitly hunt for VB-Cable
+        print("  🔍 Strategy 1: Attempting to bind to VB-Cable Virtual Audio Device...")
         try:
-            # Look for loopback devices that represent current output
             devices = sd.query_devices()
-            loopback_device = None
+            cable_device_idx = None
             
-            # Prefer 'Stereo Mix' or 'Loopback' or 'CABLE'
+            # Specifically hunt for 'CABLE Output' or 'VB-Audio'
             for i, d in enumerate(devices):
                 name = d['name'].lower()
-                if d['max_input_channels'] > 0 and any(kw in name for kw in ['loopback', 'stereo mix', 'cable', 'blackhole']):
-                    loopback_device = i
-                    print(f"  ✓ Found loopback device: {d['name']}")
+                if d['max_input_channels'] > 0 and ('cable' in name or 'vb-audio' in name):
+                    cable_device_idx = i
+                    print(f"  ✓ Found VB-Cable Virtual Device at index {i}: '{d['name']}'")
                     break
             
-            # If no obvious loopback, try the specified device or let PortAudio choose
-            stream_device = loopback_device if loopback_device is not None else self.config.audio_device
+            if cable_device_idx is None:
+                raise ValueError("VB-Cable not found in system devices.")
             
             self.audio_stream = sd.InputStream(
                 samplerate=self.config.sample_rate,
                 channels=self.config.channels,
                 callback=audio_callback,
-                blocksize=4096,
+                blocksize=16384, # Increased massively to prevent input overflow at all costs
+                latency='high',  # Force high latency mode to protect buffer
                 dtype=np.float32,
-                device=stream_device
+                device=cable_device_idx
             )
             self.audio_stream.start()
             self.is_recording = True
-            print(f"  ✅ Audio capture active on device: {devices[self.audio_stream.device]['name']}")
+            print(f"  ✅ Audio stream STARTED successfully on: {devices[self.audio_stream.device]['name']}")
             return
             
         except Exception as e:
-            print(f"  ⚠️  Loopback strategy failed: {e}")
+            print(f"  ⚠️  VB-Cable strategy failed: {e}")
             
-        # Strategy 2: Fallback to Default Input (Microphone)
+        # Strategy 2: Fallback to Default Input
         print("  🔍 Strategy 2: Falling back to Default System Input...")
         try:
+            # Let sounddevice pick whatever Windows believes is the default recording device
             self.audio_stream = sd.InputStream(
                 samplerate=self.config.sample_rate,
                 channels=self.config.channels,
                 callback=audio_callback,
-                blocksize=4096,
+                blocksize=16384,
+                latency='high',
                 dtype=np.float32,
-                device=None # None = System default
+                device=None
             )
             self.audio_stream.start()
             self.is_recording = True
-            print(f"  ✅ Audio capture active on Default Input")
+            device_info = sd.query_devices(self.audio_stream.device, 'input')
+            print(f"  ✅ Audio stream STARTED successfully on Default Input: '{device_info['name']}'")
             
         except Exception as e:
             print(f"  ❌ All audio capture strategies failed: {e}")
@@ -502,9 +542,7 @@ class MeetingBot:
         transcription_task = asyncio.create_task(self._transcription_loop())
         self.background_tasks.append(transcription_task)
         
-        # Start participant scraping loop
-        scraping_task = asyncio.create_task(self._participant_scraping_loop())
-        self.background_tasks.append(scraping_task)
+        # Removed participant scraping loop per user architecture guidelines
         
         # Monitor meeting end
         start_time = time.time()
@@ -551,10 +589,15 @@ class MeetingBot:
         print("🔄 Transcription loop started\n")
         
         chunk_count = 0
-        temp_dir = settings.TRANSCRIPTS_DIR / "temp"
+        temp_dir = settings.TRANSCRIPTS_DIR        
         temp_dir.mkdir(exist_ok=True)
         
+        self.emit_status("TRANSCRIBING", "Recording and transcribing audio in real-time...")
+        
         while self.is_recording or self.meeting_active:
+            if self.stop_event.is_set():
+                break
+
             # Get complete audio chunk from buffer
             audio_chunk = self.audio_buffer.get_chunk()
             
@@ -574,10 +617,11 @@ class MeetingBot:
                     temp_path = temp_dir / f"chunk_{chunk_count}_{int(time.time())}.wav"
                     self.audio_buffer.save_to_temp_wav(audio_chunk, temp_path)
                     
-                    # Transcribe with language lock
+                    # Transcribe with language lock and hint vocabulary
                     result = self.transcriber.transcribe_audio(
                         temp_path, 
-                        language=settings.WHISPER_LANGUAGE
+                        language=settings.WHISPER_LANGUAGE,
+                        prompt=self.config.prompt_context
                     )
                     
                     # Store transcription result
@@ -609,7 +653,10 @@ class MeetingBot:
             try:
                 temp_path = temp_dir / f"chunk_final_{int(time.time())}.wav"
                 self.audio_buffer.save_to_temp_wav(remaining, temp_path)
-                result = self.transcriber.transcribe_audio(temp_path)
+                result = self.transcriber.transcribe_audio(
+                    temp_path,
+                    prompt=self.config.prompt_context
+                )
                 self.transcription_results.append({
                     'chunk_number': chunk_count + 1,
                     'timestamp': datetime.now().isoformat(),
@@ -661,118 +708,94 @@ class MeetingBot:
                 await self.page.keyboard.press("Enter")
                 
             elif self.config.platform.lower() in ["google_meet", "meet"]:
-                # Google Meet chat flow - multi-selector approach for robustness
-                chat_selectors = [
-                    'button[aria-label*="chat" i]',
-                    'button[data-tooltip*="chat" i]',
-                    'div[aria-label*="chat" i] button',
-                    'button[aria-label*="chat with everyone" i]'
-                ]
+                # Google Meet chat flow
+                print("  ⏳ Waiting to ensure meeting is fully loaded before opening chat...")
+                await asyncio.sleep(5)
                 
-                chat_button = None
-                for selector in chat_selectors:
-                    try:
-                        chat_button = self.page.locator(selector).first
-                        if await chat_button.count() > 0:
-                            await chat_button.click(timeout=5000)
-                            print("  ✓ Opened chat panel")
-                            
-                            # WAIT for chat panel to expand/load with retries
-                            # The input field can take several seconds to appear on slow connections
-                            try:
-                                await self.page.wait_for_selector('textarea[name="chatTextInput"], textarea[aria-label*="chat" i]', timeout=10000)
-                            except:
-                                # Fallback: Look for any textarea in the side panel
-                                await self.page.wait_for_selector('aside textarea', timeout=5000)
-                            break
-                    except:
-                        continue
-                
-                if not chat_button:
-                    print("  ⚠️ Could not find chat button")
-                    return
-
-                await asyncio.sleep(2) # Extra buffer for keyboard interaction
-                
-                chat_input_selectors = [
-                    'textarea[name="chatTextInput"]',
-                    'textarea[aria-label*="chat" i]',
-                    'textarea[placeholder*="message" i]',
-                    'aside textarea'
-                ]
-                
-                for selector in chat_input_selectors:
-                    try:
-                        chat_input = self.page.locator(selector).first
-                        if await chat_input.count() > 0:
-                            # 1. Focus the field explicitly
-                            await chat_input.click()
-                            await asyncio.sleep(0.5)
-                            
-                            # 2. Try to fill it
-                            await chat_input.fill("") # Clear first
-                            await chat_input.type(disclaimer, delay=20)
-                            
-                            await asyncio.sleep(0.5)
-                            await self.page.keyboard.press("Enter")
-                            print("  ✓ Disclaimer sent to chat")
-                            return
-                    except:
-                        continue
-                        
-                # FINAL FALLBACK: Tab and Type
-                print("  ℹ️ Selector-based injection failed, trying keyboard fallback...")
-                await self.page.keyboard.press("Tab")
-                await self.page.keyboard.type(disclaimer, delay=30)
-                await self.page.keyboard.press("Enter")
-                print("  ✓ Disclaimer sent manually via keyboard")
+                chat_button = self.page.locator('button[aria-label*="chat with everyone" i], button[aria-label*="chat" i]').first
+                try:
+                    await chat_button.wait_for(state="visible", timeout=10000)
+                    await chat_button.click()
+                    print("  ✓ Opened chat panel")
+                    
+                    # WAIT for chat panel to expand
+                    chat_input = self.page.locator('textarea[name="chatTextInput"], textarea[aria-label*="chat" i], aside textarea').first
+                    await chat_input.wait_for(state="visible", timeout=10000)
+                    
+                    # Focus, fill, and send
+                    await chat_input.click()
+                    await asyncio.sleep(0.5)
+                    await chat_input.fill("")
+                    await chat_input.type(disclaimer, delay=20)
+                    await asyncio.sleep(0.5)
+                    await self.page.keyboard.press("Enter")
+                    print("  ✓ Disclaimer sent to chat")
+                    
+                    # Verification (Prompt 2)
+                    await asyncio.sleep(1)
+                    sent_msg = self.page.locator(f'text="{disclaimer}"')
+                    if await sent_msg.count() > 0:
+                        print("  ✅ Chat message verified in DOM.")
+                    else:
+                        print("  ⚠️ Chat message sent, but could not verify in DOM.")
+                except Exception as e:
+                    print(f"  ⚠️ Explicit chat injection failed, trying keyboard generic fallback... ({e})")
+                    # Fallback generic injection
+                    await self.page.keyboard.press("Tab")
+                    await self.page.keyboard.type(disclaimer, delay=30)
+                    await self.page.keyboard.press("Enter")
+                    print("  ✓ Disclaimer sent manually via keyboard")
                 
         except Exception as e:
             print(f"  ⚠️ Could not send chat disclaimer: {e}")
 
-    async def _participant_scraping_loop(self):
-        """Periodically scrape participant names from the UI"""
-        while self.is_recording or self.meeting_active:
-            try:
-                await self._scrape_participants()
-            except:
-                pass
-            await asyncio.sleep(60)  # Update every minute
-
-    async def _scrape_participants(self):
-        """Implementation for platform-specific participant scraping"""
-        try:
-            current_participants = []
-            
-            if self.config.platform.lower() == "zoom":
-                # Find elements with participant names
-                names = await self.page.locator('.participants-item__display-name').all_text_contents()
-                current_participants = [n.strip() for n in names if n.strip()]
-                
-            elif self.config.platform.lower() in ["google_meet", "meet"]:
-                # Google Meet logic
-                names = await self.page.locator('div[role="listitem"] span[data-hovercard-id]').all_text_contents()
-                if not names:
-                    # Fallback for different layouts
-                    names = await self.page.locator('div[role="listitem"] span:first-child').all_text_contents()
-                current_participants = [n.strip() for n in names if n.strip() and len(n) > 2]
-
-            # Update master list (preserve existing, add new)
-            for p in current_participants:
-                if p not in self.participants:
-                    self.participants.append(p)
-                    
-        except Exception as e:
-            # Silently fail for scraping as it's non-critical
-            pass
-
-    def stop(self):
-        """Signal the bot to stop and leave the meeting"""
+    async def stop_async(self):
+        """Async implementation of stop signaling and Playwright cleanup"""
+        print("\n🛑 Stop signal received. Attempting clean meeting exit...")
         self.meeting_active = False
         self.is_recording = False
         self.stop_event.set() # Trigger immediate loop break
-        print("\n🛑 Stop signal received")
-    
+        
+        try:
+            if self.page and not self.page.is_closed():
+                # PROMPT 4: Attempt graceful "Leave" click first
+                print("  ⏳ Clicking Leave Meeting button...")
+                if self.config.platform.lower() == "zoom":
+                    leave_btn = self.page.locator('button:has-text("Leave"), button[aria-label="Leave"]')
+                    if await leave_btn.count() > 0:
+                        await leave_btn.first.click(timeout=3000)
+                        confirm_leave = self.page.locator('button:has-text("Leave Meeting")')
+                        if await confirm_leave.count() > 0:
+                            await confirm_leave.first.click(timeout=3000)
+                else:
+                    leave_btn = self.page.locator('button[aria-label*="Leave call" i]')
+                    if await leave_btn.count() > 0:
+                        await leave_btn.first.click(timeout=3000)
+                
+                print("  ✓ Successfully clicked leave UI")
+            
+            # Immediately close the browser to avoid lingering windows and loops
+            if self.browser:
+                await self.browser.close()
+                print("  ✓ Browser forcefully closed for instant termination")
+                
+        except Exception as e:
+            print(f"  ⚠️ Could not click leave button gracefully: {e}")
+            
+    def stop(self):
+        """Signal the bot to stop and leave the meeting"""
+        # Run the async stop routine in the local event loop safely
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # We can't await here directly if called from a sync context
+                loop.create_task(self.stop_async())
+            else:
+                loop.run_until_complete(self.stop_async())
+        except:
+            self.meeting_active = False
+            self.is_recording = False
+            self.stop_event.set()
     def _finalize_session(self) -> dict:
         """
         Finalize meeting session and return results
@@ -780,6 +803,7 @@ class MeetingBot:
         Returns:
             dict: Complete session info including all transcriptions
         """
+        self.emit_status("FINALIZING", "Compiling final transcript...")
         print("\n" + "="*60)
         print("MEETING SESSION COMPLETE")
         print("="*60)
@@ -793,12 +817,81 @@ class MeetingBot:
         # Save complete transcript
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         transcript_path = settings.TRANSCRIPTS_DIR / f"live_meeting_{timestamp}.txt"
+        latest_path = settings.TRANSCRIPTS_DIR / "live_meeting_latest.txt"
+        
         with open(transcript_path, 'w', encoding='utf-8') as f:
+            f.write(full_transcript)
+        with open(latest_path, 'w', encoding='utf-8') as f:
             f.write(full_transcript)
         
         print(f"✅ Full transcript saved: {transcript_path}")
         print(f"📊 Total chunks transcribed: {len(self.transcription_results)}")
         print(f"📝 Total characters: {len(full_transcript)}")
+        
+        cleaned_transcript = full_transcript
+        summary = ""
+        action_items = []
+        
+        # 1. POST_PROCESSING (Clean proper nouns via LLM)
+        if self.summary_agent and self.config.prompt_context:
+            self.emit_status("POST_PROCESSING", "Correcting proper nouns and phonetics via LLM...")
+            cleaned_transcript = self.summary_agent.clean_transcript(full_transcript, self.config.prompt_context)
+        
+        # 2. GENERATING_SUMMARY (Summarize using Cleaned Transcript)
+        if self.summary_agent:
+            self.emit_status("GENERATING_SUMMARY", "Analyzing transcript and formatting summary...")
+            participants_list = [p.strip() for p in self.config.prompt_context.split(',')] if self.config.prompt_context else []
+            ctx = {
+                'title': "Live Meeting",
+                'date': datetime.now().strftime("%Y-%m-%d"),
+                'participants': participants_list
+            }
+            summary_res = self.summary_agent.generate_summary(cleaned_transcript, meeting_context=ctx)
+            summary = summary_res.get('summary', '')
+
+        # 3. EXTRACTING_ACTIONS (Extract tasks from Cleaned Transcript)
+        if self.action_agent:
+            self.emit_status("EXTRACTING_ACTIONS", "Scanning context for actionable tasks and deadlines...")
+            action_items = self.action_agent.extract_action_items(cleaned_transcript)
+        
+        # 4. ARCHIVING (Push everything to Mongo and Chroma)
+        if self.db:
+            self.emit_status("ARCHIVING", "Saving full intelligence report to Meeting Archive...")
+            meeting_id = str(int(time.time()))
+            participants_list = [p.strip() for p in self.config.prompt_context.split(',')] if self.config.prompt_context else []
+            
+            meeting_data = {
+                "meeting_id": meeting_id,
+                "title": "Live Meeting",
+                "date": datetime.now().isoformat(),
+                "participants": participants_list,
+                "transcript": cleaned_transcript,
+                "raw_transcript": full_transcript,
+                "summary": summary,
+                "duration": self.config.duration_minutes * 60,
+                "meeting_url": self.config.meeting_url,
+                "platform": self.config.platform,
+                "meeting_type": "live_meeting",
+                "is_live_capture": True
+            }
+            self.db.save_meeting(meeting_data)
+            
+            for item in action_items:
+                item['meeting_id'] = meeting_id
+                self.db.save_action_item(item)
+                
+            if self.vector_store:
+                self.vector_store.add_meeting(
+                    meeting_id=meeting_id,
+                    transcript=cleaned_transcript,
+                    metadata={
+                        "title": "Live Meeting",
+                        "date": datetime.now().strftime("%Y-%m-%d"),
+                        "participants": ", ".join(participants_list)
+                    }
+                )
+                
+        self.emit_status("DONE", "Meeting processed successfully. View results in Meeting Archive.")
         
         return {
             'meeting_url': self.config.meeting_url,
@@ -806,6 +899,9 @@ class MeetingBot:
             'transcript_path': str(transcript_path),
             'chunks': self.transcription_results,
             'full_transcript': full_transcript,
+            'cleaned_transcript': cleaned_transcript,
+            'summary': summary,
+            'action_items': action_items,
             'total_chunks': len(self.transcription_results),
             'participants': self.participants
         }
@@ -844,11 +940,17 @@ class MeetingBot:
                 except:
                     pass
             
-            # Close browser context with a hard timeout
-            if hasattr(self, 'context') and self.context:
+            # Close browser violently to avoid background ghosting
+            if hasattr(self, 'browser') and self.browser:
+                try:
+                    await self.browser.close()
+                    print("  ✓ Browser explicitly destroyed")
+                except:
+                    pass
+            elif hasattr(self, 'context') and self.context:
                 try:
                     # Explicitly ignore any errors during context close as it's the last step
-                    await asyncio.wait_for(self.context.close(), timeout=3.0)
+                    await asyncio.wait_for(self.context.close(), timeout=2.0)
                     print("  ✓ Browser context closed")
                 except:
                     # Move on silently - browser will be reaped by OS anyway
