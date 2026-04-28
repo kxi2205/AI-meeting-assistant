@@ -3,12 +3,17 @@ Streamlit UI for AI Meeting Assistant
 """
 import streamlit as st
 import sys
+import time
+import numpy as np
 from pathlib import Path
 from datetime import datetime
 import uuid
+
 # Add parent directory to path
 sys.path.append(str(Path(__file__).parent.parent))
 
+from integrations.recipient_resolver import RecipientResolver
+from integrations.google_auth import auth_manager
 from integrations.bot_manager import bot_manager
 from audio_processing.transcriber import AudioTranscriber
 from agents.summary_agent import SummaryAgent
@@ -47,6 +52,8 @@ if 'context_agent' not in st.session_state:
     st.session_state.context_agent = None
 if 'email_sender' not in st.session_state:
     st.session_state.email_sender = None
+if 'recipient_resolver' not in st.session_state:
+    st.session_state.recipient_resolver = None
 
 @st.cache_resource
 def load_models():
@@ -58,7 +65,8 @@ def load_models():
         vector_store = VectorStore()
         context_agent = ContextAgent(vector_store=vector_store)
         email_sender = EmailSender()
-    return transcriber, summary_agent, action_agent, vector_store, context_agent, email_sender
+        recipient_resolver = RecipientResolver()
+    return transcriber, summary_agent, action_agent, vector_store, context_agent, email_sender, recipient_resolver
 
 def main():
     st.title("Meeting Intelligence Assistant")
@@ -90,7 +98,50 @@ def main():
                 import traceback
                 st.code(traceback.format_exc())
         
+        # Integrations
+        with st.expander("⚙️ Integrations", expanded=False):
+            accounts = db.get_connected_accounts()
+            account_emails = [acc['email'] for acc in accounts]
+            
+            if accounts:
+                st.write("**Connected Google Accounts:**")
+                for email in account_emails:
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.caption(f"✅ {email}")
+                    with col2:
+                        if st.button("Disconnect", key=f"del_{email}", help="Remove this account"):
+                            if db.delete_connected_account(email):
+                                st.success("Disconnected")
+                                time.sleep(1)
+                                st.rerun()
+                
+                # Active Account Selection
+                selected_account = st.selectbox(
+                    "Active Calendar Account",
+                    options=account_emails,
+                    index=0 if 'active_google_account' not in st.session_state else account_emails.index(st.session_state.active_google_account) if st.session_state.active_google_account in account_emails else 0
+                )
+                st.session_state.active_google_account = selected_account
+            else:
+                st.write("No accounts connected.")
+                st.session_state.active_google_account = None
+                
+            st.divider()
+            
+            if st.button("➕ Connect Google Account", use_container_width=True):
+                with st.spinner("Waiting for authentication in browser..."):
+                    connected_email = auth_manager.connect_new_account()
+                    if connected_email:
+                        st.success(f"Connected: {connected_email}")
+                        st.session_state.active_google_account = connected_email
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error("Authentication failed or was cancelled.")
+
         st.divider()
+
         
         # Navigation
         page = st.radio(
@@ -107,7 +158,8 @@ def main():
              st.session_state.action_agent,
              st.session_state.vector_store,
              st.session_state.context_agent,
-             st.session_state.email_sender) = load_models()
+             st.session_state.email_sender,
+             st.session_state.recipient_resolver) = load_models()
         except Exception as e:
             st.error(f"Error loading models: {e}")
             st.stop()
@@ -129,6 +181,168 @@ def live_meeting_page():
     st.header("Join Live Session")
     st.markdown("Enter a meeting link to initiate automated audio capture and real-time transcription.")
     
+    # Reconnect to active session if running
+    if bot_manager.is_running():
+        st.info("🔄 Active session detected in background. Reconnecting UI...")
+        join_live_meeting(None, None, None, None, None, reconnect=True)
+        return
+
+    # Silent internal audio device detection (No UI)
+    if AUDIO_AVAILABLE and 'selected_device_index' not in st.session_state:
+        try:
+            devices = sd.query_devices()
+            default_out_idx = sd.default.device[1]
+            default_out_name = devices[default_out_idx]['name'].lower()
+            
+            input_devices = []
+            for i, device in enumerate(devices):
+                if device['max_input_channels'] > 0:
+                    name = device['name'].lower()
+                    # Explicitly exclude mics, headsets, and bluetooth
+                    if any(bad in name for bad in ['mic', 'headset', 'bluetooth', 'hands-free', 'handsfree']):
+                        continue
+                    input_devices.append({'index': i, 'name': name})
+            
+            candidates = []
+            # 1. Map active output to correct input
+            if "cable" in default_out_name:
+                candidates.extend([d['index'] for d in input_devices if 'cable' in d['name']])
+            elif "headphone" in default_out_name or "speaker" in default_out_name or "realtek" in default_out_name:
+                candidates.extend([d['index'] for d in input_devices if 'stereo mix' in d['name']])
+                
+            # Fallback ONLY to loopbacks, strictly no mics
+            for keyword in ['cable', 'stereo mix', 'loopback', 'blackhole']:
+                candidates.extend([d['index'] for d in input_devices if keyword in d['name'] and d['index'] not in candidates])
+                
+            st.session_state['selected_device_index'] = candidates[0] if candidates else None
+            st.session_state['audio_candidates'] = candidates
+        except Exception:
+            st.session_state['selected_device_index'] = None
+            st.session_state['audio_candidates'] = []
+    elif not AUDIO_AVAILABLE:
+        st.session_state['selected_device_index'] = None
+        st.session_state['audio_candidates'] = []
+        
+    device_ready = AUDIO_AVAILABLE and st.session_state.get('selected_device_index') is not None
+    
+    tab_calendar, tab_manual = st.tabs(["📅 Calendar Mode", "✍️ Manual Mode"])
+    
+    with tab_calendar:
+        _render_calendar_mode(device_ready)
+        
+    with tab_manual:
+        _render_manual_mode(device_ready)
+
+def verify_audio_capture():
+    """Smart Audio Fallback Strategy: test amplitude to ensure loopback works"""
+    if not AUDIO_AVAILABLE or 'audio_candidates' not in st.session_state or not st.session_state['audio_candidates']:
+        return None, False
+        
+    candidates = st.session_state['audio_candidates']
+    default_out_idx = sd.default.device[1]
+    
+    fs = 16000
+    t = np.linspace(0, 0.2, int(fs * 0.2), False)
+    beep = 0.01 * np.sin(2 * np.pi * 440 * t)  # Very quiet test sound
+    
+    for idx in candidates:
+        try:
+            rec = sd.playrec(beep, samplerate=fs, channels=1, input_device=idx, output_device=default_out_idx)
+            sd.wait()
+            if np.max(np.abs(rec)) > 0.001:  # Audio detected!
+                switched = (idx != st.session_state.get('selected_device_index'))
+                st.session_state['selected_device_index'] = idx
+                return idx, switched
+        except Exception:
+            continue
+    return None, False
+
+def _render_calendar_mode(device_ready):
+    """Render the Calendar Mode UI for joining sessions"""
+    active_account = st.session_state.get('active_google_account')
+    
+    if not active_account:
+        st.info("To use Calendar Mode, please connect and select a Google Account in the **Integrations** sidebar menu.")
+        return
+        
+    st.markdown(f"**Fetching upcoming Google Meet events for:** `{active_account}`")
+    
+    with st.spinner("Fetching calendar..."):
+        events = auth_manager.get_upcoming_events(active_account)
+        
+    if not events:
+        st.info("No upcoming meetings with Google Meet links found in the next 24 hours.")
+        return
+        
+    # Format options for selectbox
+    event_options = {}
+    for ev in events:
+        try:
+            # Parse ISO date string properly
+            start_dt = datetime.fromisoformat(ev['start_time'].replace('Z', '+00:00'))
+            # Format to local display time nicely
+            time_str = start_dt.strftime("%I:%M %p")
+        except:
+            time_str = ev['start_time']
+        
+        label = f"{time_str} - {ev['title']}"
+        event_options[label] = ev
+        
+    selected_label = st.selectbox("Select Meeting", list(event_options.keys()))
+    selected_event = event_options[selected_label]
+    
+    st.write(f"**Link:** {selected_event['meet_link']}")
+    st.write(f"**Attendees:** {len(selected_event['attendees'])} invited")
+    if selected_event['attendees']:
+        with st.expander("View attendees"):
+            with st.container(height=250):
+                full_lines = []
+                for att in selected_event['attendees']:
+                    name = att.get('name', '')
+                    email = att.get('email', '')
+                    if name and email and name != email:
+                        full_lines.append(f"* {name} — [{email}](mailto:{email})")
+                    elif email:
+                        full_lines.append(f"* [{email}](mailto:{email})")
+                    else:
+                        full_lines.append(f"* {name}")
+                st.markdown("\n".join(full_lines))
+    
+    duration = st.number_input(
+        "Max Duration (minutes)",
+        min_value=1, max_value=180, value=60,
+        key="calendar_duration"
+    )
+    
+    st.divider()
+    
+    if not device_ready:
+        st.error("❌ Audio capture system unavailable. Please verify your system's virtual audio routing.")
+    else:
+        if st.button("Initiate Session", type="primary", use_container_width=True, key="calendar_join_btn"):
+            with st.spinner("Verifying audio capture routing..."):
+                idx, switched = verify_audio_capture()
+                if idx is None:
+                    st.error("❌ No valid loopback audio capture device available. Please check virtual audio routing.")
+                    st.stop()
+                if switched:
+                    st.warning("⚠️ No audio detected. Switching capture device...")
+                    import time
+                    time.sleep(1)
+            join_live_meeting(
+                url=selected_event['meet_link'],
+                platform="google_meet",
+                duration=duration,
+                title=selected_event['title'],
+                participants_str=None, # We pass structured invitees instead
+                reconnect=False,
+                calendar_event_id=selected_event['id'],
+                linked_account=active_account,
+                invitees=selected_event['attendees']
+            )
+
+def _render_manual_mode(device_ready):
+    """Render the Manual Mode UI for joining sessions"""
     # Meeting platform selection
     platform = st.selectbox(
         "Meeting Platform",
@@ -164,37 +378,6 @@ def live_meeting_page():
         placeholder="John, Sarah, Mike"
     )
     
-    # Silent internal audio device detection (No UI)
-    if AUDIO_AVAILABLE:
-        try:
-            devices = sd.query_devices()
-            input_devices = []
-            
-            for i, device in enumerate(devices):
-                if device['max_input_channels'] > 0:
-                    input_devices.append({
-                        'index': i,
-                        'name': device['name']
-                    })
-            
-            if input_devices:
-                # Auto-select the best virtual audio channel
-                default_idx = 0
-                for i, d in enumerate(input_devices):
-                    device_name_lower = d['name'].lower()
-                    if any(keyword in device_name_lower for keyword in ['stereo mix', 'cable', 'loopback', 'blackhole']):
-                        default_idx = i
-                        break
-                
-                device_index = input_devices[default_idx]['index']
-                st.session_state['selected_device_index'] = device_index
-            else:
-                st.session_state['selected_device_index'] = None
-        except Exception:
-            st.session_state['selected_device_index'] = None
-    else:
-        st.session_state['selected_device_index'] = None
-    
     st.divider()
     
     # Validate URL
@@ -204,19 +387,20 @@ def live_meeting_page():
         "zoom.us" in meeting_url
     )
     
-    # Check if device is ready based on silent detection
-    device_ready = AUDIO_AVAILABLE and st.session_state.get('selected_device_index') is not None
-    
-    # Reconnect to active session if running
-    if bot_manager.is_running():
-        st.info("🔄 Active session detected in background. Reconnecting UI...")
-        join_live_meeting(None, None, None, None, None, reconnect=True)
-        return
-        
     # Join button
     if meeting_url:
         if url_valid and device_ready:
             if st.button("Initiate Session", type="primary", use_container_width=True):
+                with st.spinner("Verifying audio capture routing..."):
+                    idx, switched = verify_audio_capture()
+                    if idx is None:
+                        st.error("❌ No valid loopback audio capture device available. Please check virtual audio routing.")
+                        st.stop()
+                    if switched:
+                        st.warning("⚠️ No audio detected. Switching capture device...")
+                        import time
+                        time.sleep(1)
+                
                 # Convert platform name
                 platform_code = "google_meet" if platform == "Google Meet" else "zoom"
                 
@@ -229,7 +413,7 @@ def live_meeting_page():
     else:
         st.info("👆 Enter a meeting URL above to start")
 
-def join_live_meeting(url, platform, duration, title, participants_str, reconnect=False):
+def join_live_meeting(url, platform, duration, title, participants_str, reconnect=False, calendar_event_id=None, linked_account=None, invitees=None):
     """Join live meeting with bot and process results or reconnect to active one"""
     meeting_id = str(uuid.uuid4())[:8]
     
@@ -254,7 +438,10 @@ def join_live_meeting(url, platform, duration, title, participants_str, reconnec
                 audio_device=device_index,
                 headless=True,
                 bot_name="MeetAI",
-                prompt_context=participants_str  # Pass names down to fix spelling mistakes in transcription!
+                prompt_context=participants_str,
+                linked_account=linked_account,
+                calendar_event_id=calendar_event_id,
+                invitees=invitees
             )
             
             st.info("Initializing automated assistant...")
@@ -342,7 +529,9 @@ def join_live_meeting(url, platform, duration, title, participants_str, reconnec
         status_box = st.status("Reconnecting to MeetingBot Pipeline..." if reconnect else "Initializing MeetingBot Pipeline...", expanded=True)
         
         # Phase 2: Bot has joined! Show the active meeting UI
-        join_time = time.time()
+        if 'meeting_join_time' not in st.session_state:
+            st.session_state.meeting_join_time = time.time()
+        join_time = st.session_state.meeting_join_time
         
         with status_container.container():
             st.success(f"""
@@ -429,6 +618,9 @@ def join_live_meeting(url, platform, duration, title, participants_str, reconnec
         # Get result with a much longer timeout
         try:
             status, result = bot_manager.result_queue.get(timeout=60) # Increased from 5s to 60s
+            # Clear join time after meeting completes
+            if 'meeting_join_time' in st.session_state:
+                del st.session_state.meeting_join_time
         except Exception as e:
             st.warning("⚠️ Background process detached from UI (This happens on manual terminate).")
             import os
@@ -491,7 +683,16 @@ def join_live_meeting(url, platform, duration, title, participants_str, reconnec
         st.markdown("---")
         st.markdown("### Communication Dispatch")
         st.info("Generation complete. Please review the reports below to verify and dispatch to your team.")
-        dispatch_summary(summary, action_items, title or "Live Meeting", participants_str, transcript_text)
+        dispatch_summary(
+            summary, 
+            action_items, 
+            title or "Live Meeting", 
+            participants_str, 
+            transcript_text,
+            meeting_id=result.get('meeting_id'),
+            meeting_url=result.get('meeting_url'),
+            start_time=st.session_state.get('meeting_join_time')
+        )
     except Exception as e:
         st.error(f"❌ Error: {e}")
         st.markdown("**Troubleshooting:**")
@@ -504,7 +705,7 @@ def join_live_meeting(url, platform, duration, title, participants_str, reconnec
             import traceback
             st.code(traceback.format_exc())
 
-def dispatch_summary(summary, action_items, title, initial_participants, transcript=""):
+def dispatch_summary(summary, action_items, title, initial_participants, transcript="", meeting_id=None, meeting_url=None, start_time=None):
     """Component for verifying, editing, and sending meeting intelligence"""
     
     st.markdown("---")
@@ -525,47 +726,173 @@ def dispatch_summary(summary, action_items, title, initial_participants, transcr
         with st.expander("Recipient Entry", expanded=True):
             st.markdown("Enter recipient emails to distribute the intelligence report.")
             
-            verified_emails = []
+            # Fetch already resolved emails or calendar invitees if this meeting exists in DB
+            resolved_mapping = {}
+            calendar_invitees = []
+            m_data = None
+            if meeting_id:
+                m_data = db.get_meeting(meeting_id)
+                if m_data:
+                    resolved_mapping = m_data.get('resolved_emails', {})
+                    calendar_invitees = m_data.get('invitees', [])
             
-            # Default Host email if set
-            host_email = settings.SENDER_EMAIL or ""
+            # Add debug logs as requested
+            print(f"DEBUG Email Modal: Meeting ID: {meeting_id}")
+            print(f"DEBUG Email Modal: Found m_data: {bool(m_data)}")
+            print(f"DEBUG Email Modal: Found calendar_invitees: {len(calendar_invitees) if calendar_invitees else 0}")
             
-            email_input = st.text_input(
-                "Host / Primary Email", 
-                value=host_email,
-                placeholder="host@example.com"
+            # Recipient Data Preparation
+            email_data = []
+            unresolved_info = []
+            
+            # 0. Priority: Calendar Invitees from DB
+            if calendar_invitees:
+                print(f"DEBUG Email Modal: Loading {len(calendar_invitees)} recipient emails from stored invitees")
+                for att in calendar_invitees:
+                    email_data.append({
+                        "Display Name": att.get('name', ''),
+                        "Email": att.get('email', ''),
+                        "Source": att.get('source', 'Google Calendar')
+                    })
+            
+            # 1. Automatic Resolution with Caching (NEW)
+            if not email_data and meeting_url:
+                # Check if we already have resolved recipients in DB for this meeting
+                if meeting_id:
+                    m_data = db.get_meeting(meeting_id)
+                    if m_data and m_data.get('resolved_recipients'):
+                        print(f"DEBUG: Using cached recipients from DB for meeting {meeting_id}")
+                        for r in m_data['resolved_recipients']:
+                            email_data.append({
+                                "Display Name": r['name'],
+                                "Email": r['email'],
+                                "Source": f"{r['source']} (Cached)"
+                            })
+                        if m_data.get('unresolved_participants'):
+                            for u in m_data['unresolved_participants']:
+                                unresolved_info.append(f"{u['name']} ({u.get('source', 'Unknown')} - Cached)")
+                
+                # Only resolve if no cached data was found
+                if not email_data:
+                    print(f"DEBUG: No cache found. Starting recipient resolution for {meeting_url}")
+                    with st.spinner("Resolving recipients from integrated sources..."):
+                        resolution = st.session_state.recipient_resolver.resolve_all(
+                            meeting_url, 
+                            participants=initial_participants,
+                            start_time=start_time
+                        )
+                        
+                        print(f"DEBUG: Resolution source: {resolution.get('resolved_source', 'Unknown')}")
+                        print(f"DEBUG: Resolved {len(resolution['resolved'])} recipients, {len(resolution['unresolved'])} unresolved")
+                        
+                        for r in resolution['resolved']:
+                            email_data.append({
+                                "Display Name": r['name'],
+                                "Email": r['email'],
+                                "Source": r['source']
+                            })
+                        
+                        for u in resolution['unresolved']:
+                            unresolved_info.append(f"{u['name']} ({u['source']})")
+                        
+                        # Save freshly resolved results back to DB if meeting exists
+                        if meeting_id and (resolution['resolved'] or resolution['unresolved']):
+                            print(f"DEBUG: Saving resolved results to DB for meeting {meeting_id}")
+                            db.update_meeting_recipients(
+                                meeting_id, 
+                                resolution['resolved'], 
+                                resolution['unresolved']
+                            )
+            
+            # 2. Database resolved recipients (Legacy Fallback)
+            if not email_data and resolved_mapping:
+                # Handle legacy mapping format (simple dict)
+                if isinstance(resolved_mapping, dict):
+                    email_data = [{"Display Name": k, "Email": v, "Source": "Stored Mapping"} for k, v in resolved_mapping.items()]
+                else:
+                    # Handle new structured format if it exists
+                    email_data = [{"Display Name": r['name'], "Email": r['email'], "Source": r['source']} for r in resolved_mapping]
+            
+            # 3. Fallback for no resolution
+            if not email_data:
+                print("DEBUG Email Modal: Fallback to manual mode triggered")
+                st.info("No participant emails were automatically detected. Please enter them manually.", icon="ℹ️")
+                participants = []
+                if isinstance(initial_participants, list):
+                    participants = initial_participants
+                elif isinstance(initial_participants, str):
+                    participants = [p.strip() for p in initial_participants.split(',') if p.strip()]
+                
+                email_data = [{"Display Name": p, "Email": "", "Source": "Manual Entry"} for p in participants]
+                if not email_data:
+                    email_data = [{"Display Name": "Recipient", "Email": "", "Source": "Manual Entry"}]
+            
+            # Display unresolved participants separately
+            if unresolved_info:
+                with st.expander("⚠️ Unresolved Participants (Emails missing)", expanded=False):
+                    st.write("The following participants were detected but no email address was found in integrated sources:")
+                    for info in unresolved_info:
+                        st.markdown(f"- {info}")
+                    st.caption("You can add their emails manually in the table below to include them in the dispatch.")
+
+            # Use data editor for clean manual entry
+            edited_recipients = st.data_editor(
+                email_data,
+                num_rows="dynamic",
+                use_container_width=True,
+                key=f"dispatch_recipients_{meeting_id or 'new'}",
+                column_config={
+                    "Source": st.column_config.TextColumn(disabled=True)
+                }
             )
-            if email_input:
-                verified_emails.append(email_input.strip())
-            
-            other_emails = st.text_input(
-                "Additional Recipients", 
-                placeholder="colleague@example.com, manager@example.com",
-                help="Comma-separated list of additional emails"
-            )
-            if other_emails:
-                for e in other_emails.split(','):
-                    if e.strip():
-                        verified_emails.append(e.strip())
-            
             # Send button
             if st.button("Finalize & Distribute Report", type="primary", use_container_width=True):
-                # Unique emails only
-                verified_emails = list(set(verified_emails))
+                # Extract valid emails
+                verified_emails = [row.get("Email", "").strip() for row in edited_recipients if row.get("Email", "").strip()]
                 
                 if not verified_emails:
                     st.warning("Please specify at least one verified recipient.")
                 else:
                     with st.spinner("Transmitting encrypted intelligence..."):
                         # Use EDITED content for the email
-                        success = st.session_state.email_sender.send_meeting_summary(
-                            verified_emails,
-                            edited_summary,  # Use edited version
-                            action_items,
-                            edited_title     # Use edited version
+                        results = st.session_state.email_sender.send_meeting_summary(
+                            recipient_emails=verified_emails,
+                            summary=edited_summary,
+                            action_items=action_items,
+                            meeting_title=edited_title,
+                            date=datetime.now().strftime("%Y-%m-%d"),
+                            transcript_text=edited_transcript
                         )
-                        if success:
-                            st.success(f"Intelligence report successfully transmitted to {len(verified_emails)} recipients.")
+                        
+                        # Save mapping back to DB if meeting exists
+                        if meeting_id and results["successes"]:
+                            # Build structured mapping of successfully sent emails
+                            new_recipients = []
+                            for row in edited_recipients:
+                                email = row.get("Email", "").strip()
+                                if email in results["successes"]:
+                                    new_recipients.append({
+                                        "name": row.get("Display Name", "Unknown"),
+                                        "email": email,
+                                        "source": row.get("Source", "Manual Entry")
+                                    })
+                            
+                            if new_recipients:
+                                # Update DB with structured data
+                                db.update_meeting_recipients(meeting_id, new_recipients)
+                            
+                            # Log history
+                            db.add_email_event(meeting_id, {
+                                "attempted": verified_emails,
+                                "successes": results["successes"],
+                                "failures": results["failures"],
+                                "invalid": results["invalid_format"]
+                            })
+
+                        if results["successes"]:
+                            st.success(f"Intelligence report successfully transmitted to {len(results['successes'])} recipients.")
+                            if results["failures"]:
+                                st.warning(f"Failed to deliver to: {', '.join(results['failures'])}")
                         else:
                             st.error("Transmission failure. Please verify SMTP configuration.")
     else:
@@ -711,12 +1038,171 @@ def process_meeting(audio_file, title, participants_str):
         st.markdown("### Communication Dispatch")
         st.markdown("Verify details and distribute the meeting intelligence report.")
         
-        dispatch_summary(summary, action_items, title, participants_list, transcript_text)
+        dispatch_summary(summary, action_items, title, participants_list, transcript_text, meeting_id=meeting_id)
         
     except Exception as e:
         st.error(f"Error processing meeting: {e}")
         import traceback
         st.code(traceback.format_exc())
+
+@st.dialog("Configure & Send Email")
+def render_email_dispatch_modal(meeting):
+    st.write(f"Configure email payload for: **{meeting.get('title', 'Unknown')}**")
+    
+    st.subheader("1. Recipients")
+    
+    # 1. Recipient Data Preparation
+    email_data = []
+    unresolved_info = []
+    
+    # Check new structured field first (Caching Layer)
+    resolved_recipients = meeting.get('resolved_recipients', [])
+    unresolved_participants = meeting.get('unresolved_participants', [])
+    
+    if resolved_recipients:
+        print(f"DEBUG: Loading cached recipients from DB for archive meeting {meeting['meeting_id']}")
+        email_data = [{"Display Name": r['name'], "Email": r['email'], "Source": f"{r['source']} (Cached)"} for r in resolved_recipients]
+        for u in unresolved_participants:
+            unresolved_info.append(f"{u['name']} ({u.get('source', 'Unknown')} - Cached)")
+    else:
+        # If no cache, try legacy emails or automatic resolution
+        legacy_emails = meeting.get('resolved_emails', {})
+        if legacy_emails:
+            print(f"DEBUG: Loading legacy emails for archive meeting {meeting['meeting_id']}")
+            email_data = [{"Display Name": name, "Email": email, "Source": "Legacy Stored"} for name, email in legacy_emails.items()]
+        
+        # If still no emails, try to resolve automatically
+        if not email_data and meeting.get('meeting_url'):
+            print(f"DEBUG: No cache found. Attempting resolution for archive meeting {meeting['meeting_id']}")
+            with st.spinner("Attempting to resolve recipients..."):
+                resolution = st.session_state.recipient_resolver.resolve_all(
+                    meeting.get('meeting_url'),
+                    participants=meeting.get('participants', []),
+                    start_time=None
+                )
+                print(f"DEBUG: Resolution complete. Found {len(resolution['resolved'])} resolved.")
+                
+                for r in resolution['resolved']:
+                    email_data.append({"Display Name": r['name'], "Email": r['email'], "Source": r['source']})
+                for u in resolution['unresolved']:
+                    unresolved_info.append(f"{u['name']} ({u['source']})")
+                
+                # Save results back to DB
+                if resolution['resolved'] or resolution['unresolved']:
+                    db.update_meeting_recipients(
+                        meeting['meeting_id'], 
+                        resolution['resolved'], 
+                        resolution['unresolved']
+                    )
+
+    # Final fallback: manual entry rows for participants
+    if not email_data:
+        st.info("No participant emails were stored for this meeting. You can enter them manually below.", icon="ℹ️")
+        participants = meeting.get('participants', [])
+        if isinstance(participants, list):
+            email_data = [{"Display Name": p, "Email": "", "Source": "Manual Entry"} for p in participants]
+        elif isinstance(participants, str):
+            email_data = [{"Display Name": p.strip(), "Email": "", "Source": "Manual Entry"} for p in participants.split(",") if p.strip()]
+        else:
+            email_data = []
+            
+    if not email_data:
+        email_data = [{"Display Name": "", "Email": "", "Source": "Manual Entry"}]
+
+    # Display unresolved participants
+    if unresolved_info:
+        with st.expander("⚠️ Unresolved Participants (Emails missing)", expanded=False):
+            for info in unresolved_info:
+                st.markdown(f"- {info}")
+
+    edited_recipients = st.data_editor(
+        email_data,
+        num_rows="dynamic",
+        use_container_width=True,
+        key=f"recipients_{meeting['meeting_id']}",
+        column_config={
+            "Source": st.column_config.TextColumn(disabled=True)
+        }
+    )
+    
+    st.subheader("2. Draft Action Items")
+    st.caption("Draft edits will apply to the email only and will NOT irreversibly overwrite the archive DB.")
+    
+    actions = db.get_action_items(meeting_id=meeting['meeting_id'])
+    if actions:
+        action_data = [{"Task": a.get("task", ""), "Assignee": a.get("assignee_name", a.get("owner", "")), "Deadline": a.get("deadline", "")} for a in actions]
+    else:
+        action_data = [{"Task": "", "Assignee": "", "Deadline": ""}]
+        
+    edited_actions = st.data_editor(
+        action_data,
+        num_rows="dynamic",
+        use_container_width=True,
+        key=f"actions_{meeting['meeting_id']}"
+    )
+    
+    st.subheader("3. Content Toggles")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        inc_sum = st.checkbox("Include Summary", value=True)
+    with c2:
+        inc_act = st.checkbox("Include Actions", value=True)
+    with c3:
+        inc_trn = st.checkbox("Include Transcript", value=False)
+        
+    if st.button("🚀 Dispatch Emails", type="primary", use_container_width=True):
+        recipient_emails = [row.get("Email", "").strip() for row in edited_recipients if row.get("Email", "").strip()]
+        
+        draft_actions = [{"task": r.get("Task", ""), "assignee_name": r.get("Assignee", ""), "deadline": r.get("Deadline", "")} for r in edited_actions if str(r.get("Task", "")).strip()]
+        
+        with st.spinner("Dispatching via SMTP..."):
+            results = st.session_state.email_sender.send_meeting_summary(
+                recipient_emails=recipient_emails,
+                summary=meeting.get('summary', ''),
+                action_items=draft_actions,
+                meeting_title=meeting.get('title', 'Unknown'),
+                date=meeting.get('date', '')[:10],
+                include_summary=inc_sum,
+                include_actions=inc_act,
+                include_transcript=inc_trn,
+                transcript_text=meeting.get('transcript', '')
+            )
+            
+            # Save mapping strictly for successfully validated and transmitted addresses
+            if results["successes"]:
+                valid_emailset = set(results["successes"])
+                new_recipients = []
+                for row in edited_recipients:
+                    email = row.get("Email", "").strip()
+                    if email in valid_emailset:
+                        new_recipients.append({
+                            "name": row.get("Display Name", "Unknown"),
+                            "email": email,
+                            "source": row.get("Source", "Manual Entry")
+                        })
+                
+                if new_recipients:
+                    # Update DB with structured data
+                    db.update_meeting_recipients(meeting['meeting_id'], new_recipients)
+            
+            db.add_email_event(meeting['meeting_id'], {
+                "attempted": recipient_emails,
+                "successes": results["successes"],       # successfully attempted
+                "failures": results["failures"],         # smtp level failure
+                "invalid": results["invalid_format"]     # regex format failure
+            })
+            
+            if results["successes"]:
+                st.success(f"Sent successfully to: {', '.join(results['successes'])}")
+            if results["invalid_format"]:
+                st.warning(f"Invalid format (skipped): {', '.join(results['invalid_format'])}")
+            if results["failures"]:
+                st.error(f"Failed to deliver: {', '.join(results['failures'])}")
+            
+            if not results["failures"] and results["successes"]:
+                import time
+                time.sleep(2)
+                st.rerun()
 
 def past_meetings_page():
     """View past meetings and ask questions"""
@@ -774,7 +1260,10 @@ def past_meetings_page():
                 st.markdown(f"**Meeting:** {title} &nbsp;|&nbsp; **Date:** {meeting.get('date', 'Unknown')[:19]} &nbsp;|&nbsp; **Duration:** {meeting.get('duration', 0):.1f}s")
                 st.markdown(f"**Participants:** {', '.join(meeting.get('participants', ['Not specified']))}")
                 
-                _, del_col = st.columns([5, 1])
+                _, btn_col, del_col = st.columns([4, 1, 1])
+                with btn_col:
+                    if st.button("✉️ Send Summary", key=f"email_{meeting['meeting_id']}", use_container_width=True):
+                        render_email_dispatch_modal(meeting)
                 with del_col:
                     if st.button("🗑️ Delete", key=f"del_{meeting['meeting_id']}", use_container_width=True):
                         with st.spinner("Removing..."):

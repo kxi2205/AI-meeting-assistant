@@ -48,6 +48,10 @@ SENDER_PASSWORD = os.getenv("SENDER_PASSWORD")
 # Bot Identity
 BOT_NAME = os.getenv("BOT_NAME", "MeetAI")
 
+# Google OAuth Credentials
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+
 # Audio Processing
 MAX_AUDIO_SIZE_MB = int(os.getenv("MAX_AUDIO_SIZE_MB", "100"))
 FFMPEG_BINARY_PATH = os.getenv("FFMPEG_BINARY_PATH", None)
