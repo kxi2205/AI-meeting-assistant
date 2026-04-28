@@ -58,6 +58,11 @@ class MeetingConfig:
     disable_camera: bool = True  # Disable camera on join
     audio_device: Optional[int] = None  # Audio device index (None = default)
     headless: bool = True  # Run browser in headless mode (invisible)
+    
+    # Calendar Integration Metadata
+    linked_account: Optional[str] = None
+    calendar_event_id: Optional[str] = None
+    invitees: Optional[list] = None
     bot_name: str = settings.BOT_NAME  # Name to use when joining
     prompt_context: str = ""  # Initial prompt for Whisper to learn proper noun spellings
 
@@ -182,8 +187,14 @@ class MeetingBot:
         self.transcription_results: List[dict] = []
         self.participants: List[str] = []
         self.meeting_active = False
+        import threading
+        self.hard_stop_flag = threading.Event()
         self.stop_event = asyncio.Event()  # For instant stop signaling
         self.background_tasks: List[asyncio.Task] = []
+        
+        # Timing bookkeeping
+        self.joined_at: Optional[float] = None
+        self.ended_at: Optional[float] = None
         
     def emit_status(self, state: str, detail: str = ""):
         """Push a state string to the globally preserved singleton manager for UI consumption"""
@@ -208,6 +219,7 @@ class MeetingBot:
         try:
             # Step 1: Launch browser and join meeting
             await self._launch_browser()
+            self.joined_at = time.time()  # Record actual join time
             await self._join_meeting_by_platform()
             
             # Step 2: Send chat disclaimer (BEFORE audio starts, as requested)
@@ -504,29 +516,8 @@ class MeetingBot:
             return
             
         except Exception as e:
-            print(f"  ⚠️  VB-Cable strategy failed: {e}")
-            
-        # Strategy 2: Fallback to Default Input
-        print("  🔍 Strategy 2: Falling back to Default System Input...")
-        try:
-            # Let sounddevice pick whatever Windows believes is the default recording device
-            self.audio_stream = sd.InputStream(
-                samplerate=self.config.sample_rate,
-                channels=self.config.channels,
-                callback=audio_callback,
-                blocksize=16384,
-                latency='high',
-                dtype=np.float32,
-                device=None
-            )
-            self.audio_stream.start()
-            self.is_recording = True
-            device_info = sd.query_devices(self.audio_stream.device, 'input')
-            print(f"  ✅ Audio stream STARTED successfully on Default Input: '{device_info['name']}'")
-            
-        except Exception as e:
-            print(f"  ❌ All audio capture strategies failed: {e}")
-            raise
+            print(f"  ❌ Audio capture failed. No system audio capture device available: {e}")
+            raise RuntimeError("No system audio capture device available")
     
     async def _monitor_meeting(self):
         """
@@ -568,11 +559,14 @@ class MeetingBot:
                     await asyncio.sleep(1)
                 
         finally:
+            self.ended_at = time.time()  # Record actual end time
             self.meeting_active = False
             self.is_recording = False
+            self.hard_stop_flag.set()
             
-            # Wait for transcription to finish
-            await transcription_task
+            # Wait for transcription to finish, unless hard stopped
+            if not self.hard_stop_flag.is_set():
+                await transcription_task
     
     async def _transcription_loop(self):
         """
@@ -594,8 +588,8 @@ class MeetingBot:
         
         self.emit_status("TRANSCRIBING", "Recording and transcribing audio in real-time...")
         
-        while self.is_recording or self.meeting_active:
-            if self.stop_event.is_set():
+        while (self.is_recording or self.meeting_active) and not self.hard_stop_flag.is_set():
+            if self.stop_event.is_set() or self.hard_stop_flag.is_set():
                 break
 
             # Get complete audio chunk from buffer
@@ -783,19 +777,35 @@ class MeetingBot:
             print(f"  ⚠️ Could not click leave button gracefully: {e}")
             
     def stop(self):
-        """Signal the bot to stop and leave the meeting"""
+        """Signal the bot to stop and leave the meeting immediately"""
+        print("\n🛑 HARD STOP signal received from UI. Terminating immediately...")
+        self.hard_stop_flag.set()
+        self.stop_event.set()
+        self.meeting_active = False
+        self.is_recording = False
+        
+        # Stop audio stream immediately
+        if self.audio_stream:
+            try:
+                self.audio_stream.stop()
+                self.audio_stream.close()
+            except Exception as e:
+                print(f"  ⚠️ Error stopping audio stream: {e}")
+                
         # Run the async stop routine in the local event loop safely
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                # We can't await here directly if called from a sync context
-                loop.create_task(self.stop_async())
+                # Cancel all background tasks immediately
+                for task in self.background_tasks:
+                    if not task.done():
+                        task.cancel()
+                loop.call_soon_threadsafe(lambda: loop.create_task(self.stop_async()))
             else:
                 loop.run_until_complete(self.stop_async())
-        except:
-            self.meeting_active = False
-            self.is_recording = False
-            self.stop_event.set()
+        except Exception as e:
+            print(f"  ⚠️ Error scheduling stop_async: {e}")
+            
     def _finalize_session(self) -> dict:
         """
         Finalize meeting session and return results
@@ -860,6 +870,13 @@ class MeetingBot:
             meeting_id = str(int(time.time()))
             participants_list = [p.strip() for p in self.config.prompt_context.split(',')] if self.config.prompt_context else []
             
+            # Calculate actual duration
+            actual_duration = 0
+            if self.joined_at and self.ended_at:
+                actual_duration = int(self.ended_at - self.joined_at)
+            else:
+                actual_duration = self.config.duration_minutes * 60
+                
             meeting_data = {
                 "meeting_id": meeting_id,
                 "title": "Live Meeting",
@@ -868,11 +885,16 @@ class MeetingBot:
                 "transcript": cleaned_transcript,
                 "raw_transcript": full_transcript,
                 "summary": summary,
-                "duration": self.config.duration_minutes * 60,
+                "duration": actual_duration,
                 "meeting_url": self.config.meeting_url,
                 "platform": self.config.platform,
                 "meeting_type": "live_meeting",
-                "is_live_capture": True
+                "is_live_capture": True,
+                "joined_at": datetime.fromtimestamp(self.joined_at).isoformat() if self.joined_at else None,
+                "ended_at": datetime.fromtimestamp(self.ended_at).isoformat() if self.ended_at else None,
+                "linked_account": self.config.linked_account,
+                "calendar_event_id": self.config.calendar_event_id,
+                "invitees": self.config.invitees
             }
             self.db.save_meeting(meeting_data)
             
@@ -903,7 +925,8 @@ class MeetingBot:
             'summary': summary,
             'action_items': action_items,
             'total_chunks': len(self.transcription_results),
-            'participants': self.participants
+            'participants': self.participants,
+            'meeting_id': meeting_id if self.db else None
         }
     
     async def _cleanup(self):

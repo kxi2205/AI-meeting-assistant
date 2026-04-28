@@ -21,6 +21,7 @@ class MeetingDatabase:
             # Collections
             self.meetings = self.db['meetings']
             self.action_items = self.db['action_items']
+            self.connected_accounts = self.db['connected_accounts']
             
             # Test connection
             self.client.admin.command('ping')
@@ -165,6 +166,54 @@ class MeetingDatabase:
             print(f"✓ Action item {item_id} updated to {status}")
         except Exception as e:
             print(f"❌ Error updating action item: {e}")
+            
+    def update_meeting_recipients(self, meeting_id, resolved_recipients, unresolved_participants=None):
+        """
+        Save resolved and unresolved recipients to the meeting document.
+        
+        Args:
+            meeting_id: Meeting ID
+            resolved_recipients: List of {name, email, source}
+            unresolved_participants: List of {name, source}
+        """
+        try:
+            update_data = {
+                'resolved_recipients': resolved_recipients,
+                'updated_at': datetime.now()
+            }
+            if unresolved_participants is not None:
+                update_data['unresolved_participants'] = unresolved_participants
+                
+            self.meetings.update_one(
+                {'meeting_id': meeting_id},
+                {'$set': update_data}
+            )
+            print(f"✓ Recipients updated for meeting {meeting_id}")
+        except Exception as e:
+            print(f"❌ Error updating recipients: {e}")
+            
+    def update_meeting_emails(self, meeting_id, resolved_emails):
+        """Save resolved emails mapping to the meeting document."""
+        try:
+            self.meetings.update_one(
+                {'meeting_id': meeting_id},
+                {'$set': {'resolved_emails': resolved_emails, 'updated_at': datetime.now()}}
+            )
+            print(f"✓ Resolved emails updated for meeting {meeting_id}")
+        except Exception as e:
+            print(f"❌ Error updating meeting emails: {e}")
+            
+    def add_email_event(self, meeting_id, history_event):
+        """Append an email dispatch record to the meeting's send history."""
+        try:
+            history_event['timestamp'] = datetime.now()
+            self.meetings.update_one(
+                {'meeting_id': meeting_id},
+                {'$push': {'email_send_history': history_event}, '$set': {'updated_at': datetime.now()}}
+            )
+            print(f"✓ Added email event history for meeting {meeting_id}")
+        except Exception as e:
+            print(f"❌ Error adding email event: {e}")
     
     def get_statistics(self):
         """
@@ -196,6 +245,96 @@ class MeetingDatabase:
                 'total_action_items': 0,
                 'pending_actions': 0
             }
+
+    # --- Connected Accounts Operations ---
+    
+    def save_connected_account(self, account_data):
+        """
+        Save a connected Google account and its tokens.
+        Upserts based on the email address.
+        """
+        try:
+            email = account_data.get('email')
+            if not email:
+                raise ValueError("Account data must contain an email address")
+                
+            account_data['updated_at'] = datetime.now()
+            
+            # Using upsert so reconnecting an existing account updates its tokens
+            self.connected_accounts.update_one(
+                {'email': email},
+                {
+                    '$set': account_data,
+                    '$setOnInsert': {'connected_at': datetime.now()}
+                },
+                upsert=True
+            )
+            # Log success but DO NOT log the token data
+            print(f"✓ Connected account saved for {email}")
+            return True
+        except Exception as e:
+            print(f"❌ Error saving connected account: {e}")
+            return False
+
+    def get_connected_accounts(self):
+        """
+        Retrieve all connected Google accounts.
+        Returns a list of account dicts.
+        """
+        try:
+            return list(self.connected_accounts.find({}, {'_id': 0}).sort('connected_at', -1))
+        except Exception as e:
+            print(f"❌ Error retrieving connected accounts: {e}")
+            return []
+
+    def get_connected_account(self, email):
+        """
+        Retrieve a specific connected Google account by email.
+        """
+        try:
+            return self.connected_accounts.find_one({'email': email}, {'_id': 0})
+        except Exception as e:
+            print(f"❌ Error retrieving connected account: {e}")
+            return None
+
+    def delete_connected_account(self, email):
+        """
+        Delete a connected Google account by email.
+        """
+        try:
+            result = self.connected_accounts.delete_one({'email': email})
+            if result.deleted_count > 0:
+                print(f"✓ Connected account deleted for {email}")
+                return True
+            return False
+        except Exception as e:
+            print(f"❌ Error deleting connected account: {e}")
+            return False
+
+    def update_account_tokens(self, email, new_access_token, new_refresh_token=None, new_expiry=None):
+        """
+        Update the tokens for an existing account after a refresh.
+        """
+        try:
+            update_fields = {
+                'access_token': new_access_token,
+                'updated_at': datetime.now()
+            }
+            if new_refresh_token:
+                update_fields['refresh_token'] = new_refresh_token
+            if new_expiry:
+                update_fields['expiry'] = new_expiry
+                
+            self.connected_accounts.update_one(
+                {'email': email},
+                {'$set': update_fields}
+            )
+            # Log success but DO NOT log the token data
+            print(f"✓ Tokens refreshed and saved for {email}")
+            return True
+        except Exception as e:
+            print(f"❌ Error updating account tokens: {e}")
+            return False
 
 # Create a global database instance
 db = MeetingDatabase()
