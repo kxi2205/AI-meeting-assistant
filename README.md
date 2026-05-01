@@ -13,6 +13,26 @@ A production-ready intelligent meeting assistant powered by **Retrieval-Augmente
 
 ---
 
+## 👥 Quick Start for Teammates
+
+If you are joining the project, follow these 3 steps to get up and running:
+
+1. **Environment Setup**:
+   ```powershell
+   python -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   pip install -r requirements.txt
+   playwright install chromium
+   ```
+2. **Configuration**:
+   Copy `.env.example` to `.env` and fill in the `GROQ_API_KEY` and `MONGODB_URI`.
+3. **Run**:
+   ```powershell
+   streamlit run ui/streamlit_app.py
+   ```
+
+---
+
 ## 🌟 Key Features
 
 ### 🎙️ **Automatic Speech Recognition (ASR)**
@@ -48,7 +68,7 @@ A production-ready intelligent meeting assistant powered by **Retrieval-Augmente
   - Persistent storage with automatic indexing
 
 ### 🎨 **Modern Web Interface**
-- **Framework**: Streamlit 1.32.2 with real-time updates
+- **Framework**: Streamlit 1.57.0 with real-time updates
 - **Pages**: 
   1. New Meeting Upload (drag-and-drop, progress tracking)
   2. Past Meetings Browser (search, filter, per-meeting Q&A)
@@ -161,7 +181,7 @@ Query Process:
 | **Database** | MongoDB Atlas | Free M0 | Structured storage | 512MB, 100 connections |
 | **Embeddings** | sentence-transformers | 2.5.1 | Text vectorization | all-MiniLM-L6-v2 (384-dim) |
 | **Orchestration** | LangChain | 0.1.20 | Agent framework | Multi-agent coordination |
-| **UI Framework** | Streamlit | 1.32.2 | Web interface | Real-time updates, WebSocket |
+| **UI Framework** | Streamlit | 1.57.0 | Web interface | Real-time updates, WebSocket |
 | **Audio Processing** | FFmpeg | 8.0.1 | Format conversion | MP3, WAV, M4A, OGG, FLAC support |
 
 ### Python Dependencies
@@ -175,7 +195,7 @@ Core Libraries:
 - langchain-groq==0.1.3 (Groq integration for LangChain)
 - sentence-transformers==2.5.1 (Embedding models)
 - pymongo==4.6.2 (MongoDB driver)
-- streamlit==1.32.2 (Web UI framework)
+- streamlit==1.57.0 (Web UI framework)
 
 ML/AI Stack:
 - torch==2.9.1 (Deep learning framework for Whisper)
