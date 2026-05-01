@@ -54,9 +54,12 @@ class EmailSender:
         results = {"successes": [], "failures": [], "invalid_format": []}
         
         if not self.enabled:
-            print("❌ Cannot send email: SMTP not fully configured.")
+            print(f"❌ Cannot send email: SMTP not fully configured. Server: {self.smtp_server}, Port: {self.smtp_port}, User: {self.sender_email}")
             return results
             
+        print(f"📧 Starting email dispatch for meeting: {meeting_title}")
+        print(f"   Recipients to process: {recipient_emails}")
+        
         import re
         email_regex = re.compile(r"^[^@]+@[^@]+\.[^@]+$")
         
@@ -71,8 +74,10 @@ class EmailSender:
                 results["invalid_format"].append(clean_email)
                 
         if not valid_emails:
-            print("⚠️ No valid recipient emails structured to send.")
+            print(f"⚠️ No valid recipient emails found. Original list: {recipient_emails}")
             return results
+            
+        print(f"✅ Found {len(valid_emails)} valid recipients: {valid_emails}")
             
         date_str = date or datetime.now().strftime("%B %d, %Y")
         
@@ -91,9 +96,12 @@ class EmailSender:
         html_content = self._generate_html(meeting_title, date_str, summary, action_items, include_summary, include_actions, include_transcript, transcript_text)
         
         try:
+            print(f"🔌 Connecting to SMTP server: {self.smtp_server}:{self.smtp_port}...")
             with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
                 server.starttls()
+                print(f"🔑 Attempting login for: {self.sender_email}...")
                 server.login(self.sender_email, self.sender_password)
+                print("🔓 SMTP Login successful!")
                 
                 # Send INDIVIDUALLY to prevent BCC exposure and handle specific failures
                 for email in valid_emails:

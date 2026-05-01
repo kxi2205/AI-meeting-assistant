@@ -181,9 +181,31 @@ def live_meeting_page():
     st.header("Join Live Session")
     st.markdown("Enter a meeting link to initiate automated audio capture and real-time transcription.")
     
-    # Reconnect to active session if running
+    # 1. Check for persistent meeting report view
+    if 'last_meeting_result' in st.session_state and st.session_state.last_meeting_result:
+        if st.button("⬅️ Start New Session", type="secondary"):
+            st.session_state.last_meeting_result = None
+            st.rerun()
+        display_meeting_report(st.session_state.last_meeting_result)
+        return
+
+    # 2. Reconnect to active session if running
     if bot_manager.is_running():
         st.info("🔄 Active session detected in background. Reconnecting UI...")
+        
+        # Load history so the UI isn't blank
+        with st.expander("Session History", expanded=False):
+            history = bot_manager.get_missed_status_history()
+            for evt in history:
+                state = evt.get("state", "UNKNOWN")
+                detail = evt.get("detail", "")
+                st.write(f"⌛ **{state}**: {detail}")
+        
+        # Emergency reset if the regular terminate fails
+        if st.button("🚨 Emergency Reset (Use if Terminate fails)", type="secondary", use_container_width=True):
+            bot_manager.force_reset()
+            st.rerun()
+            
         join_live_meeting(None, None, None, None, None, reconnect=True)
         return
 
@@ -311,35 +333,26 @@ def _render_calendar_mode(device_ready):
     duration = st.number_input(
         "Max Duration (minutes)",
         min_value=1, max_value=180, value=60,
-        key="calendar_duration"
+        key="calendar_duration",
+        help="Bot will automatically leave after this time as a safety measure"
     )
     
     st.divider()
     
-    if not device_ready:
-        st.error("❌ Audio capture system unavailable. Please verify your system's virtual audio routing.")
-    else:
-        if st.button("Initiate Session", type="primary", use_container_width=True, key="calendar_join_btn"):
-            with st.spinner("Verifying audio capture routing..."):
-                idx, switched = verify_audio_capture()
-                if idx is None:
-                    st.error("❌ No valid loopback audio capture device available. Please check virtual audio routing.")
-                    st.stop()
-                if switched:
-                    st.warning("⚠️ No audio detected. Switching capture device...")
-                    import time
-                    time.sleep(1)
-            join_live_meeting(
-                url=selected_event['meet_link'],
-                platform="google_meet",
-                duration=duration,
-                title=selected_event['title'],
-                participants_str=None, # We pass structured invitees instead
-                reconnect=False,
-                calendar_event_id=selected_event['id'],
-                linked_account=active_account,
-                invitees=selected_event['attendees']
-            )
+    if st.button("Initiate Session", type="primary", use_container_width=True, key="calendar_join_btn"):
+        # Use session state to be 100% sure we don't lose the user's duration setting
+        final_duration = st.session_state.get("calendar_duration", 60)
+        join_live_meeting(
+            url=selected_event['meet_link'],
+            platform="google_meet",
+            duration=final_duration,
+            title=selected_event['title'],
+            participants_str=None, # We pass structured invitees instead
+            reconnect=False,
+            calendar_event_id=selected_event['id'],
+            linked_account=active_account,
+            invitees=selected_event['attendees']
+        )
 
 def _render_manual_mode(device_ready):
     """Render the Manual Mode UI for joining sessions"""
@@ -369,8 +382,8 @@ def _render_manual_mode(device_ready):
             "Max Duration (minutes)",
             min_value=1,
             max_value=180,
-            value=30,
-            help="Bot will automatically leave after this time"
+            value=60,
+            help="Bot will automatically leave after this time as a safety measure"
         )
     
     participants = st.text_input(
@@ -389,25 +402,13 @@ def _render_manual_mode(device_ready):
     
     # Join button
     if meeting_url:
-        if url_valid and device_ready:
+        if url_valid:
             if st.button("Initiate Session", type="primary", use_container_width=True):
-                with st.spinner("Verifying audio capture routing..."):
-                    idx, switched = verify_audio_capture()
-                    if idx is None:
-                        st.error("❌ No valid loopback audio capture device available. Please check virtual audio routing.")
-                        st.stop()
-                    if switched:
-                        st.warning("⚠️ No audio detected. Switching capture device...")
-                        import time
-                        time.sleep(1)
-                
                 # Convert platform name
                 platform_code = "google_meet" if platform == "Google Meet" else "zoom"
                 
                 # Join meeting (no warnings needed - fully automated)
                 join_live_meeting(meeting_url, platform_code, duration, meeting_title, participants)
-        elif not device_ready:
-            st.error("❌ Audio capture system unavailable. Please verify your system's virtual audio routing.")
         else:
             st.error("❌ Invalid meeting URL. Please check the format.")
     else:
@@ -544,6 +545,13 @@ def join_live_meeting(url, platform, duration, title, participants_str, reconnec
         # Wait for completion with live timer and stop button
         max_wait = (duration * 60) + 120  # Duration + 2 min buffer
         
+        # Show stop button ONCE outside the loop to avoid duplicate key errors
+        with stop_placeholder:
+            if st.button("Terminate Session", key="stable_terminate_btn", type="primary", use_container_width=True):
+                bot_manager.stop_bot()
+                timer_placeholder.markdown(f"### Finalizing...")
+                st.warning("🛑 Terminating assistant...")
+        
         while bot_manager.is_running() and (time.time() - join_time) < max_wait:
             elapsed_seconds = int(time.time() - join_time)
             hours = elapsed_seconds // 3600
@@ -571,18 +579,12 @@ def join_live_meeting(url, platform, duration, title, participants_str, reconnec
                     status_box.write(f"✅ **{state}**: {detail}")
                 elif state == "ERROR":
                     status_box.update(label=detail, state="error")
+                elif state == "FINALIZING":
+                    status_box.update(label=f"📝 {detail}", state="running")
+                    status_box.write(f"⌛ **{state}**: {detail}")
                 else:
                     status_box.update(label=f"[{state}] {detail}", state="running")
                     status_box.write(f"🔄 **{state}**: {detail}")
-            
-            # Show stop button
-            with stop_placeholder:
-                if st.button("Terminate Session", key=f"stop_bot_{elapsed_seconds}", type="primary", use_container_width=True):
-                        bot_manager.stop_bot()
-                        timer_placeholder.markdown(f"### Finalizing after **{timer_str}**")
-                        st.warning("🛑 Terminating assistant... Finalizing intelligence report in background.")
-                        # Let the bot finish its cleanup gracefully
-                        pass
             
             # Check stop_event indirectly by checking thread or results
             if not bot_manager.is_running():
@@ -590,6 +592,9 @@ def join_live_meeting(url, platform, duration, title, participants_str, reconnec
 
             time.sleep(1)
             
+        # Clear the terminate button after meeting ends
+        stop_placeholder.empty()
+        
         # Drain remaining status queue messages sequentially before final display
         while bot_manager.status_queue and not bot_manager.status_queue.empty():
             evt = bot_manager.status_queue.get()
@@ -642,68 +647,72 @@ def join_live_meeting(url, platform, duration, title, participants_str, reconnec
         
         st.success("✅ Meeting bot has left the meeting!")
         
-        # Display extracted results directly from the background payload
-        transcript_text = result.get('full_transcript', '')
-        cleaned_transcript = result.get('cleaned_transcript', '')
-        summary = result.get('summary', 'No summary generated.')
-        action_items = result.get('action_items', [])
+        # Store in session state for persistence and show report
+        st.session_state.last_meeting_result = result
+        display_meeting_report(result)
+        return
         
-        st.info("The intelligence extraction has completed perfectly. Please review the reports below and switch to the 'Meeting Archive' tab whenever you're ready.")
-        
-        # Display transcripts
-        st.markdown("---")
-        st.markdown("### Session Transcript")
-        tab1, tab2 = st.tabs(["Cleaned Transcript (Proper Nouns Corrected)", "Raw Transcript"])
-        with tab1:
-            st.text_area("Clean Transcript", cleaned_transcript, height=300, key="clean_transcript")
-        with tab2:
-            st.text_area("Raw", transcript_text, height=300, key="raw_transcript")
-            st.caption(f"Transcribed in {result.get('total_chunks', 0)} chunks")
-        
-        # Display Analytical Summary and Actions
-        st.markdown("---")
-        with st.expander("Analytical Summary", expanded=True):
-            st.markdown(summary)
-            
-        if action_items:
-            st.markdown("### Action Items")
-            with st.expander(f"Identified Tasks ({len(action_items)})", expanded=True):
-                for i, item in enumerate(action_items, 1):
-                    confidence = str(item.get('confidence', 'medium')).upper()
-                    st.markdown(f"**{i}. {item.get('task', 'Unknown task')}**")
-                    col1, col2, col3 = st.columns(3)
-                    col1.caption(f"Assignee: {item.get('assignee_name', 'Unassigned')}")
-                    col2.caption(f"Deadline: {item.get('deadline', 'Not specified')}")
-                    col3.caption(f"Confidence: {confidence}")
-                    if item.get('evidence'):
-                        st.caption(f"🔍 *Evidence: \"{item.get('evidence')}\"*")
-                    st.divider()
-
-        # 5. COMMUNICATION DISPATCH
-        st.markdown("---")
-        st.markdown("### Communication Dispatch")
-        st.info("Generation complete. Please review the reports below to verify and dispatch to your team.")
-        dispatch_summary(
-            summary, 
-            action_items, 
-            title or "Live Meeting", 
-            participants_str, 
-            transcript_text,
-            meeting_id=result.get('meeting_id'),
-            meeting_url=result.get('meeting_url'),
-            start_time=st.session_state.get('meeting_join_time')
-        )
     except Exception as e:
-        st.error(f"❌ Error: {e}")
-        st.markdown("**Troubleshooting:**")
-        st.markdown("1. Ensure VB-CABLE is installed and configured")
-        st.markdown("2. Run: `python integrations/audio_device_helper.py`")
-        st.markdown("3. Check that the meeting URL is correct")
-        st.markdown("4. For Google Meet, you may need to log in manually when prompted")
-        
+        st.error(f"❌ Error during meeting processing: {e}")
         with st.expander("View Error Details"):
             import traceback
             st.code(traceback.format_exc())
+
+def display_meeting_report(result):
+    """Standalone component to display meeting results with persistence"""
+    # Display extracted results directly from the background payload
+    transcript_text = result.get('full_transcript', '')
+    cleaned_transcript = result.get('cleaned_transcript', '')
+    summary = result.get('summary', 'No summary generated.')
+    action_items = result.get('action_items', [])
+    participants_str = result.get('participants_str', 'Detected Attendees')
+    title = result.get('title', 'Live Meeting')
+    
+    st.info("The intelligence extraction has completed perfectly. Please review the reports below and switch to the 'Meeting Archive' tab whenever you're ready.")
+    
+    # Display transcripts
+    st.markdown("---")
+    st.markdown("### Session Transcript")
+    tab1, tab2 = st.tabs(["Cleaned Transcript", "Raw Transcript"])
+    with tab1:
+        st.text_area("Clean Transcript", cleaned_transcript, height=300, key="clean_transcript")
+    with tab2:
+        st.text_area("Raw", transcript_text, height=300, key="raw_transcript")
+        st.caption(f"Transcribed in {result.get('total_chunks', 0)} chunks")
+    
+    # Display Analytical Summary and Actions
+    st.markdown("---")
+    with st.expander("Analytical Summary", expanded=True):
+        st.markdown(summary)
+        
+    if action_items:
+        st.markdown("### Action Items")
+        with st.expander(f"Identified Tasks ({len(action_items)})", expanded=True):
+            for i, item in enumerate(action_items, 1):
+                confidence = str(item.get('confidence', 'medium')).upper()
+                st.markdown(f"**{i}. {item.get('task', 'Unknown task')}**")
+                col1, col2, col3 = st.columns(3)
+                col1.caption(f"Assignee: {item.get('assignee_name', 'Unassigned')}")
+                col2.caption(f"Deadline: {item.get('deadline', 'Not specified')}")
+                col3.caption(f"Confidence: {confidence}")
+                if item.get('evidence'):
+                    st.caption(f"🔍 *Evidence: \"{item.get('evidence')}\"*")
+                st.divider()
+
+    # 5. COMMUNICATION DISPATCH
+    st.markdown("---")
+    st.markdown("### Communication Dispatch")
+    st.info("Generation complete. Please review the reports below to verify and dispatch to your team.")
+    dispatch_summary(
+        summary, 
+        action_items, 
+        title, 
+        participants_str, 
+        transcript_text,
+        meeting_id=result.get('meeting_id'),
+        meeting_url=result.get('meeting_url'),
+        start_time=None 
+    )
 
 def dispatch_summary(summary, action_items, title, initial_participants, transcript="", meeting_id=None, meeting_url=None, start_time=None):
     """Component for verifying, editing, and sending meeting intelligence"""
@@ -851,8 +860,10 @@ def dispatch_summary(summary, action_items, title, initial_participants, transcr
                 verified_emails = [row.get("Email", "").strip() for row in edited_recipients if row.get("Email", "").strip()]
                 
                 if not verified_emails:
-                    st.warning("Please specify at least one verified recipient.")
+                    st.warning("Please specify at least one verified recipient. Enter an email in the 'Email' column above.")
+                    print(f"DEBUG Dispatch: No verified emails found in editor. Content: {edited_recipients}")
                 else:
+                    print(f"DEBUG Dispatch: Initiating transmission to {len(verified_emails)} recipients...")
                     with st.spinner("Transmitting encrypted intelligence..."):
                         # Use EDITED content for the email
                         results = st.session_state.email_sender.send_meeting_summary(
@@ -863,6 +874,7 @@ def dispatch_summary(summary, action_items, title, initial_participants, transcr
                             date=datetime.now().strftime("%Y-%m-%d"),
                             transcript_text=edited_transcript
                         )
+                        print(f"DEBUG Dispatch: Transmission results: {results}")
                         
                         # Save mapping back to DB if meeting exists
                         if meeting_id and results["successes"]:

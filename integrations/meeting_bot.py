@@ -117,6 +117,11 @@ class AudioBuffer:
                 self.buffer = np.array([], dtype=np.float32)
                 return chunk
             return None
+
+    def clear(self):
+        """Purge all audio in the buffer immediately"""
+        with self.lock:
+            self.buffer = np.array([], dtype=np.float32)
     
     def to_wav_bytes(self, audio_data: np.ndarray) -> bytes:
         """
@@ -188,9 +193,12 @@ class MeetingBot:
         self.participants: List[str] = []
         self.meeting_active = False
         import threading
+        # Threading and Asyncio
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.hard_stop_flag = threading.Event()
         self.stop_event = asyncio.Event()  # For instant stop signaling
         self.background_tasks: List[asyncio.Task] = []
+        self.cable_device_idx = None
         
         # Timing bookkeeping
         self.joined_at: Optional[float] = None
@@ -203,10 +211,9 @@ class MeetingBot:
     async def join_meeting(self):
         """
         Main entry point: Join meeting and start audio capture
-        
-        Returns:
-            dict: Meeting session info and transcription results
         """
+        # Capture the current running loop for thread-safe stop signaling
+        self.loop = asyncio.get_running_loop()
         self.emit_status("JOINING", "Connecting to session...")
         print(f"\n{'='*60}")
         print(f"MEETING BOT - Starting")
@@ -484,31 +491,54 @@ class MeetingBot:
             if self.is_recording:
                 self.audio_buffer.add_frames(indata.copy())
         
-        # Strategy 1: Explicitly hunt for VB-Cable
-        print("  🔍 Strategy 1: Attempting to bind to VB-Cable Virtual Audio Device...")
+        # Strategy 1: Attempt WASAPI Loopback (Most reliable for Windows)
+        print("  🔍 Strategy 1: Attempting WASAPI Loopback (Universal Capture)...")
+        self.cable_device_idx = None
         try:
+            import sounddevice as sd
             devices = sd.query_devices()
-            cable_device_idx = None
+            host_apis = sd.query_hostapis()
             
-            # Specifically hunt for 'CABLE Output' or 'VB-Audio'
-            for i, d in enumerate(devices):
-                name = d['name'].lower()
-                if d['max_input_channels'] > 0 and ('cable' in name or 'vb-audio' in name):
-                    cable_device_idx = i
-                    print(f"  [SUCCESS] Found VB-Cable Virtual Device at index {i}: '{d['name']}'")
-                    break
+            # Find WASAPI Host API index
+            wasapi_idx = next((i for i, api in enumerate(host_apis) if 'WASAPI' in api['name']), None)
             
-            if cable_device_idx is None:
-                raise ValueError("VB-Cable not found in system devices.")
+            if wasapi_idx is not None:
+                default_out_idx = sd.default.device[1]
+                default_out_name = devices[default_out_idx]['name']
+                
+                # Look for a WASAPI input device that is a loopback for our default output
+                loopback_idx = None
+                for i, d in enumerate(devices):
+                    if d['hostapi'] == wasapi_idx and d['max_input_channels'] > 0:
+                        # On Windows, loopback devices often share the same name as the output or have 'Loopback' in it
+                        if default_out_name in d['name'] or 'loopback' in d['name'].lower():
+                            loopback_idx = i
+                            break
+                
+                if loopback_idx is not None:
+                    self.cable_device_idx = loopback_idx
+                    print(f"  [SUCCESS] Found WASAPI Loopback at index {loopback_idx}: '{devices[loopback_idx]['name']}'")
+                
+            if self.cable_device_idx is None:
+                # Fallback to keyword search
+                for i, d in enumerate(devices):
+                    name = d['name'].lower()
+                    if d['max_input_channels'] > 0 and any(keyword in name for keyword in ['cable', 'vb-audio', 'stereo mix', 'wave out mix', 'loopback']):
+                        self.cable_device_idx = i
+                        print(f"  [SUCCESS] Found Fallback Loopback Device at index {i}: '{d['name']}'")
+                        break
+            
+            if self.cable_device_idx is None:
+                raise ValueError("No compatible loopback device found.")
             
             self.audio_stream = sd.InputStream(
                 samplerate=self.config.sample_rate,
                 channels=self.config.channels,
                 callback=audio_callback,
-                blocksize=16384, # Increased massively to prevent input overflow at all costs
+                blocksize=32768, # Increased even more to prevent input overflow
                 latency='high',  # Force high latency mode to protect buffer
                 dtype=np.float32,
-                device=cable_device_idx
+                device=self.cable_device_idx
             )
             self.audio_stream.start()
             self.is_recording = True
@@ -562,11 +592,10 @@ class MeetingBot:
             self.ended_at = time.time()  # Record actual end time
             self.meeting_active = False
             self.is_recording = False
-            self.hard_stop_flag.set()
+            self.hard_stop_flag.set() # Instant stop for transcription engine
             
-            # Wait for transcription to finish, unless hard stopped
-            if not self.hard_stop_flag.is_set():
-                await transcription_task
+            # Final clean exit
+            self.emit_status("DONE", "Meeting ended. Bot disconnected.")
     
     async def _transcription_loop(self):
         """
@@ -588,8 +617,10 @@ class MeetingBot:
         
         self.emit_status("TRANSCRIBING", "Recording and transcribing audio in real-time...")
         
-        while (self.is_recording or self.meeting_active) and not self.hard_stop_flag.is_set():
-            if self.stop_event.is_set() or self.hard_stop_flag.is_set():
+        while (self.is_recording or self.meeting_active):
+            # Check flags AND if the main thread is still alive
+            if self.stop_event.is_set() or self.hard_stop_flag.is_set() or not threading.main_thread().is_alive():
+                print("  [DEBUG] Termination signal or main thread death detected. Exiting loop.")
                 break
 
             # Get complete audio chunk from buffer
@@ -628,11 +659,18 @@ class MeetingBot:
                     
                     # Display transcription
                     print(f"  [SUCCESS] Chunk #{chunk_count}: {result['text'][:100]}...")
+                    self.emit_status("TRANSCRIBING", f"Captured Chunk #{chunk_count}: {result['text'][:50]}...")
                     print()
                     
-                    # Clean up temp file
-                    temp_path.unlink()
+                    # Clean up temp files (WAV and the fragment TXT saved by transcriber)
+                    if temp_path.exists():
+                        temp_path.unlink()
                     
+                    # Also remove the fragment transcript file if the transcriber created one
+                    fragment_txt = temp_path.with_name(temp_path.stem + "_transcript.txt")
+                    if fragment_txt.exists():
+                        fragment_txt.unlink()
+                        
                 except Exception as e:
                     print(f"  [ERROR] Transcription error for chunk #{chunk_count}: {e}")
             
@@ -640,26 +678,35 @@ class MeetingBot:
                 # No complete chunk yet, wait
                 await asyncio.sleep(1)
         
-        # Process any remaining audio
-        remaining = self.audio_buffer.get_remaining()
-        if remaining is not None and len(remaining) > 1000:  # At least 1 second
-            print("[INFO] Transcribing final chunk...")
-            try:
-                temp_path = temp_dir / f"chunk_final_{int(time.time())}.wav"
-                self.audio_buffer.save_to_temp_wav(remaining, temp_path)
-                result = self.transcriber.transcribe_audio(
-                    temp_path,
-                    prompt=self.config.prompt_context
-                )
-                self.transcription_results.append({
-                    'chunk_number': chunk_count + 1,
-                    'timestamp': datetime.now().isoformat(),
-                    'text': result['text'],
-                    'duration': result['duration']
-                })
-                temp_path.unlink()
-            except Exception as e:
-                print(f"  [ERROR] Final chunk transcription error: {e}")
+        # Process remaining audio ONLY if it was NOT a hard stop
+        if not self.hard_stop_flag.is_set():
+            remaining = self.audio_buffer.get_remaining()
+            if remaining is not None and len(remaining) > 1000:
+                print("[INFO] Transcribing final chunk...")
+                try:
+                    temp_path = temp_dir / f"chunk_final_{int(time.time())}.wav"
+                    self.audio_buffer.save_to_temp_wav(remaining, temp_path)
+                    result = self.transcriber.transcribe_audio(
+                        temp_path,
+                        prompt=self.config.prompt_context
+                    )
+                    self.transcription_results.append({
+                        'chunk_number': chunk_count + 1,
+                        'timestamp': datetime.now().isoformat(),
+                        'text': result['text'],
+                        'duration': result['duration']
+                    })
+                    
+                    # Clean up final temp files
+                    if temp_path.exists():
+                        temp_path.unlink()
+                    fragment_txt = temp_path.with_name(temp_path.stem + "_transcript.txt")
+                    if fragment_txt.exists():
+                        fragment_txt.unlink()
+                except Exception as e:
+                    print(f"  [ERROR] Final chunk transcription error: {e}")
+        else:
+            print("  [INFO] Hard stop requested. Skipping final buffer processing.")
         
         print("✅ Transcription loop completed")
     
@@ -752,19 +799,22 @@ class MeetingBot:
         
         try:
             if self.page and not self.page.is_closed():
-                # PROMPT 4: Attempt graceful "Leave" click first
-                print("  [WAIT] Clicking Leave Meeting button...")
-                if self.config.platform.lower() == "zoom":
-                    leave_btn = self.page.locator('button:has-text("Leave"), button[aria-label="Leave"]')
-                    if await leave_btn.count() > 0:
-                        await leave_btn.first.click(timeout=3000)
-                        confirm_leave = self.page.locator('button:has-text("Leave Meeting")')
-                        if await confirm_leave.count() > 0:
-                            await confirm_leave.first.click(timeout=3000)
+                # For hard stops, skip the graceful "Leave" click and go straight to closing
+                if not self.hard_stop_flag.is_set():
+                    print("  [WAIT] Clicking Leave Meeting button...")
+                    if self.config.platform.lower() == "zoom":
+                        leave_btn = self.page.locator('button:has-text("Leave"), button[aria-label="Leave"]')
+                        if await leave_btn.count() > 0:
+                            await leave_btn.first.click(timeout=3000)
+                            confirm_leave = self.page.locator('button:has-text("Leave Meeting")')
+                            if await confirm_leave.count() > 0:
+                                await confirm_leave.first.click(timeout=3000)
+                    elif self.config.platform.lower() in ["google_meet", "meet"]:
+                        leave_btn = self.page.locator('button[aria-label*="Leave call" i], button[aria-label*="Hang up" i]')
+                        if await leave_btn.count() > 0:
+                            await leave_btn.first.click(timeout=3000)
                 else:
-                    leave_btn = self.page.locator('button[aria-label*="Leave call" i]')
-                    if await leave_btn.count() > 0:
-                        await leave_btn.first.click(timeout=3000)
+                    print("  [INFO] Skipping graceful exit flow for instant termination.")
                 
                 print("  [SUCCESS] Successfully clicked leave UI")
             
@@ -791,18 +841,23 @@ class MeetingBot:
                 self.audio_stream.close()
             except Exception as e:
                 print(f"  [WARNING] Error stopping audio stream: {e}")
+        
+        # PURGE THE BUFFER - This is the key to stopping the "backlog" transcription
+        if self.audio_buffer:
+            print("  [DEBUG] Purging audio buffer to prevent backlog transcription...")
+            self.audio_buffer.clear()
                 
-        # Run the async stop routine in the local event loop safely
+        # Run the async stop routine in the correct event loop safely
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
+            if self.loop and self.loop.is_running():
                 # Cancel all background tasks immediately
                 for task in self.background_tasks:
                     if not task.done():
                         task.cancel()
-                loop.call_soon_threadsafe(lambda: loop.create_task(self.stop_async()))
+                self.loop.call_soon_threadsafe(lambda: self.loop.create_task(self.stop_async()))
             else:
-                loop.run_until_complete(self.stop_async())
+                # Fallback if loop isn't running or accessible
+                print("  [WARNING] Could not access bot event loop for graceful stop. Forcing local flags.")
         except Exception as e:
             print(f"  ⚠️ Error scheduling stop_async: {e}")
             
@@ -843,26 +898,38 @@ class MeetingBot:
         action_items = []
         
         # 1. POST_PROCESSING (Clean proper nouns via LLM)
-        if self.summary_agent and self.config.prompt_context:
+        if self.summary_agent and self.config.prompt_context and not self.hard_stop_flag.is_set():
             self.emit_status("POST_PROCESSING", "Correcting proper nouns and phonetics via LLM...")
-            cleaned_transcript = self.summary_agent.clean_transcript(full_transcript, self.config.prompt_context)
+            try:
+                cleaned_transcript = self.summary_agent.clean_transcript(full_transcript, self.config.prompt_context)
+            except Exception as e:
+                print(f"  [WARNING] Transcript cleaning failed: {e}")
+                cleaned_transcript = full_transcript
         
         # 2. GENERATING_SUMMARY (Summarize using Cleaned Transcript)
-        if self.summary_agent:
+        if self.summary_agent and not self.hard_stop_flag.is_set():
             self.emit_status("GENERATING_SUMMARY", "Analyzing transcript and formatting summary...")
-            participants_list = [p.strip() for p in self.config.prompt_context.split(',')] if self.config.prompt_context else []
-            ctx = {
-                'title': "Live Meeting",
-                'date': datetime.now().strftime("%Y-%m-%d"),
-                'participants': participants_list
-            }
-            summary_res = self.summary_agent.generate_summary(cleaned_transcript, meeting_context=ctx)
-            summary = summary_res.get('summary', '')
+            try:
+                participants_list = [p.strip() for p in self.config.prompt_context.split(',')] if self.config.prompt_context else []
+                ctx = {
+                    'title': "Live Meeting",
+                    'date': datetime.now().strftime("%Y-%m-%d"),
+                    'participants': participants_list
+                }
+                summary_res = self.summary_agent.generate_summary(cleaned_transcript, meeting_context=ctx)
+                summary = summary_res.get('summary', '')
+            except Exception as e:
+                print(f"  [WARNING] Summary generation failed: {e}")
+                summary = "Summary generation skipped or failed."
 
         # 3. EXTRACTING_ACTIONS (Extract tasks from Cleaned Transcript)
-        if self.action_agent:
+        if self.action_agent and not self.hard_stop_flag.is_set():
             self.emit_status("EXTRACTING_ACTIONS", "Scanning context for actionable tasks and deadlines...")
-            action_items = self.action_agent.extract_action_items(cleaned_transcript)
+            try:
+                action_items = self.action_agent.extract_action_items(cleaned_transcript)
+            except Exception as e:
+                print(f"  [WARNING] Action item extraction failed: {e}")
+                action_items = []
         
         # 4. ARCHIVING (Push everything to Mongo and Chroma)
         if self.db:

@@ -38,6 +38,19 @@ class _BotManager:
     def stop_bot(self):
         if self.bot_instance:
             self.bot_instance.stop()
+            
+    def force_reset(self):
+        """Emergency reset: clears everything and kills references"""
+        if self.bot_instance:
+            try:
+                self.bot_instance.stop()
+            except:
+                pass
+        self.bot_instance = None
+        self.bot_thread = None
+        self.status_history = []
+        self.status_queue = None
+        self.result_queue = None
 
 # Instantiate the singleton at the module level
 bot_manager = _BotManager()
