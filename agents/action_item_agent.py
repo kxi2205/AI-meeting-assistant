@@ -20,7 +20,7 @@ class ActionItemAgent:
             max_retries=3
         )
         self.model = settings.GROQ_MODEL
-        print("✓ Action Item Agent initialized")
+        print("[SUCCESS] Action Item Agent initialized")
     
     def extract_action_items(self, transcript):
         """
@@ -82,15 +82,15 @@ If no action items are found, return an empty array: []"""
             for item in action_items:
                 item['status'] = 'pending'
             
-            print(f"✓ Extracted {len(action_items)} action items")
+            print(f"[SUCCESS] Extracted {len(action_items)} action items")
             return action_items
             
         except json.JSONDecodeError as e:
-            print(f"⚠️  JSON parsing error: {e}")
+            print(f"[WARNING] JSON parsing error: {e}")
             print(f"Response was: {result_text}")
             return []
         except Exception as e:
-            print(f"❌ Action item extraction error: {e}")
+            print(f"[ERROR] Action item extraction error: {e}")
             raise
     
     def categorize_action_items(self, action_items):

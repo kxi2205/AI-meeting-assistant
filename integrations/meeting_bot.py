@@ -229,9 +229,9 @@ class MeetingBot:
             try:
                 self._start_audio_capture()
             except Exception as audio_error:
-                print(f"\n⚠️ Audio capture failed: {audio_error}")
-                print("⚠️ Continuing without audio capture (bot will stay in meeting)")
-                print("⚠️ You can still see the bot in the meeting, but no transcription will occur")
+                print(f"\n[WARNING] Audio capture failed: {audio_error}")
+                print("[WARNING] Continuing without audio capture (bot will stay in meeting)")
+                print("[WARNING] You can still see the bot in the context, but no transcription will occur")
             
             # Step 4: Monitor meeting, transcribe, and scrape participants
             await self._monitor_meeting()
@@ -240,14 +240,14 @@ class MeetingBot:
             return self._finalize_session()
             
         except Exception as e:
-            print(f"❌ Meeting bot error: {e}")
+            print(f"[ERROR] Meeting bot error: {e}")
             raise
         finally:
             await self._cleanup()
     
     async def _launch_browser(self):
         """Launch Playwright browser for a guest join"""
-        print("🌐 Launching browser for guest meeting join...")
+        print("[INFO] Launching browser for guest meeting join...")
         
         playwright = await async_playwright().start()
         
@@ -267,7 +267,7 @@ class MeetingBot:
             viewport={'width': 1280, 'height': 720}
         )
         self.page = await self.context.new_page()
-        print("✅ Browser launched (Incognito/Guest Mode)")
+        print("[SUCCESS] Browser launched (Incognito/Guest Mode)")
     
     async def _minimize_browser(self):
         """Minimize the browser window after joining the meeting"""
@@ -280,14 +280,14 @@ class MeetingBot:
                 "windowId": window_id,
                 "bounds": {"windowState": "minimized"}
             })
-            print("  ✓ Browser window minimized")
+            print("  [SUCCESS] Browser window minimized")
         except Exception as e:
             # Fallback: move window off-screen
             try:
                 await self.page.evaluate("window.moveTo(-10000, -10000)")
-                print("  ✓ Browser window moved off-screen")
+                print("  [SUCCESS] Browser window moved off-screen")
             except:
-                print(f"  ⚠️  Could not minimize browser: {e}")
+                print(f"  [WARNING] Could not minimize browser: {e}")
 
     async def _join_meeting_by_platform(self):
         """Route to platform-specific join logic"""
@@ -320,23 +320,23 @@ class MeetingBot:
             try:
                 join_browser_link = self.page.locator('a:has-text("Join from Your Browser")')
                 await join_browser_link.click(timeout=10000)
-                print("  ✓ Clicked 'Join from Browser'")
+                print("  [SUCCESS] Clicked 'Join from Browser'")
             except PlaywrightTimeout:
-                print("  ⚠️  'Join from Browser' link not found, may already be on join page")
+                print("  [WARNING] 'Join from Browser' link not found, may already be on join page")
             
             await asyncio.sleep(2)
             
             # Enter name (required by Zoom)
             name_input = self.page.locator('input[type="text"]#input-for-name, input[placeholder*="name" i]').first
             await name_input.fill("AI Meeting Assistant Bot")
-            print("  ✓ Entered bot name")
+            print("  [SUCCESS] Entered bot name")
             
             # Disable camera if configured
             if self.config.disable_camera:
                 try:
                     camera_button = self.page.locator('button[aria-label*="camera" i], button:has-text("Stop Video")')
                     await camera_button.click(timeout=5000)
-                    print("  ✓ Camera disabled")
+                    print("  [SUCCESS] Camera disabled")
                 except:
                     pass  # Camera may already be off
             
@@ -345,24 +345,24 @@ class MeetingBot:
                 try:
                     mute_button = self.page.locator('button[aria-label*="mute" i], button:has-text("Mute")')
                     await mute_button.click(timeout=5000)
-                    print("  ✓ Microphone muted")
+                    print("  [SUCCESS] Microphone muted")
                 except:
                     pass
             
             # Click "Join" button
             join_button = self.page.locator('button:has-text("Join")')
             await join_button.click()
-            print("  ✓ Clicked 'Join Meeting'")
+            print("  [SUCCESS] Clicked 'Join Meeting'")
             
             await asyncio.sleep(5)
             
             # Check for waiting room
             waiting_room = self.page.locator('text="Waiting for the host to start this meeting"')
             if await waiting_room.count() > 0:
-                print("  ⏳ In waiting room... waiting for host")
+                print("  [WAIT] In waiting room... waiting for host")
             
             self.meeting_active = True
-            print("✅ Successfully joined Zoom meeting")
+            print("[SUCCESS] Successfully joined Zoom meeting")
             
             # Minimize browser window to keep it out of the way
             await self._minimize_browser()
@@ -390,21 +390,21 @@ class MeetingBot:
             
             # Check if login is required
             if "accounts.google.com" in self.page.url:
-                print("  ⚠️  Google account login required!")
-                print("  ℹ️  Please log in manually in the browser window")
-                print("  ⏳ Waiting for login... (60 seconds)")
+                print("  [WARNING] Google account login required!")
+                print("  [INFO] Please log in manually in the browser window")
+                print("  [WAIT] Waiting for login... (60 seconds)")
                 await asyncio.sleep(60)  # Give user time to log in
             
             # Wait explicitly for the guest name input field
             try:
-                print("  ⏳ Waiting for name input field...")
+                print("  [WAIT] Waiting for name input field...")
                 name_input = self.page.locator('input[placeholder*="name" i], input[aria-label*="name" i]')
                 await name_input.first.wait_for(state="visible", timeout=15000)
                 await name_input.first.fill(self.config.bot_name)
-                print(f"  ✓ Entered identity: {self.config.bot_name}")
+                print(f"  [SUCCESS] Entered identity: {self.config.bot_name}")
                 await asyncio.sleep(1)
             except Exception as e:
-                print(f"  ℹ️ No name field found (might be logged in): {e}")
+                print(f"  [INFO] No name field found (might be logged in): {e}")
             
             # Disable camera
             if self.config.disable_camera:
@@ -412,7 +412,7 @@ class MeetingBot:
                     camera_button = self.page.locator('button[aria-label*="camera" i][aria-label*="off" i], div[data-tooltip*="camera" i]')
                     if await camera_button.count() > 0:
                         await camera_button.first.click(timeout=5000)
-                        print("  ✓ Camera disabled")
+                        print("  [SUCCESS] Camera disabled")
                 except:
                     pass
             
@@ -422,7 +422,7 @@ class MeetingBot:
                     mic_button = self.page.locator('button[aria-label*="microphone" i][aria-label*="off" i], div[data-tooltip*="microphone" i]')
                     if await mic_button.count() > 0:
                         await mic_button.first.click(timeout=5000)
-                        print("  ✓ Microphone muted")
+                        print("  [SUCCESS] Microphone muted")
                 except:
                     pass
             
@@ -430,25 +430,25 @@ class MeetingBot:
             
             # Click "Join now" or "Ask to join" using explicit waiting
             try:
-                print("  ⏳ Waiting for Join button...")
+                print("  [WAIT] Waiting for Join button...")
                 join_button = self.page.locator('button:has-text("Join now"), button:has-text("Ask to join")')
                 await join_button.first.wait_for(state="visible", timeout=10000)
                 await join_button.first.click()
-                print("  ✓ Clicked 'Join' / 'Ask to join'")
+                print("  [SUCCESS] Clicked 'Join' / 'Ask to join'")
             except Exception as e:
-                print(f"  ⚠️ Could not click join button: {e}")
+                print(f"  [WARNING] Could not click join button: {e}")
                 raise
             
             # PROMPT 1: Wait conditions so it does not fail due to loading
-            print("  ⏳ Waiting to be admitted to the meeting...")
+            print("  [WAIT] Waiting to be admitted to the meeting...")
             try:
                 # Wait for meeting controls to appear (signaling admission)
                 controls_locator = self.page.locator('button[aria-label*="Leave call" i], button[aria-label*="Turn off microphone" i], div[data-meeting-code]')
                 await controls_locator.first.wait_for(state="visible", timeout=60000)
                 self.meeting_active = True
-                print("✅ Successfully admitted to Google Meet")
+                print("[SUCCESS] Successfully admitted to Google Meet")
             except Exception as e:
-                print(f"❌ Failed to confirm admission to Google Meet: {e}")
+                print(f"[ERROR] Failed to confirm admission to Google Meet: {e}")
                 raise
             
             # Minimize browser window to keep it out of the way
@@ -495,7 +495,7 @@ class MeetingBot:
                 name = d['name'].lower()
                 if d['max_input_channels'] > 0 and ('cable' in name or 'vb-audio' in name):
                     cable_device_idx = i
-                    print(f"  ✓ Found VB-Cable Virtual Device at index {i}: '{d['name']}'")
+                    print(f"  [SUCCESS] Found VB-Cable Virtual Device at index {i}: '{d['name']}'")
                     break
             
             if cable_device_idx is None:
@@ -512,11 +512,11 @@ class MeetingBot:
             )
             self.audio_stream.start()
             self.is_recording = True
-            print(f"  ✅ Audio stream STARTED successfully on: {devices[self.audio_stream.device]['name']}")
+            print(f"  [SUCCESS] Audio stream STARTED successfully on: {devices[self.audio_stream.device]['name']}")
             return
             
         except Exception as e:
-            print(f"  ❌ Audio capture failed. No system audio capture device available: {e}")
+            print(f"  [ERROR] Audio capture failed. No system audio capture device available: {e}")
             raise RuntimeError("No system audio capture device available")
     
     async def _monitor_meeting(self):
@@ -543,13 +543,13 @@ class MeetingBot:
             while not self.stop_event.is_set() and self.meeting_active:
                 # Check timeout
                 if time.time() - start_time > max_duration:
-                    print(f"\n⏱️  Maximum duration ({self.config.duration_minutes} min) reached")
+                    print(f"\n[INFO] Maximum duration ({self.config.duration_minutes} min) reached")
                     break
                 
                 # Check if meeting ended (platform-specific detection)
                 # Use a faster check
                 if await self._is_meeting_ended():
-                    print("\n🏁 Meeting ended detected")
+                    print("\n[INFO] Meeting ended detected")
                     break
                 
                 # Sleep in smaller increments to check stop_event frequently
@@ -597,14 +597,14 @@ class MeetingBot:
             
             if audio_chunk is not None:
                 chunk_count += 1
-                print(f"📝 Transcribing chunk #{chunk_count}...")
+                print(f"[INFO] Transcribing chunk #{chunk_count}...")
                 
                 try:
                     # Check if chunk has any actual audio (not just silence)
                     # This prevents Whisper from hallucinating during silences
                     rms = np.sqrt(np.mean(audio_chunk**2))
                     if rms < 0.005: # Silence threshold
-                        # print(f"  ⏳ Skipping silent chunk (RMS: {rms:.5f})")
+                        # print(f"  [WAIT] Skipping silent chunk (RMS: {rms:.5f})")
                         continue
 
                     # Create temporary WAV file in memory-backed location
@@ -627,14 +627,14 @@ class MeetingBot:
                     })
                     
                     # Display transcription
-                    print(f"  ✅ Chunk #{chunk_count}: {result['text'][:100]}...")
+                    print(f"  [SUCCESS] Chunk #{chunk_count}: {result['text'][:100]}...")
                     print()
                     
                     # Clean up temp file
                     temp_path.unlink()
                     
                 except Exception as e:
-                    print(f"  ❌ Transcription error for chunk #{chunk_count}: {e}")
+                    print(f"  [ERROR] Transcription error for chunk #{chunk_count}: {e}")
             
             else:
                 # No complete chunk yet, wait
@@ -643,7 +643,7 @@ class MeetingBot:
         # Process any remaining audio
         remaining = self.audio_buffer.get_remaining()
         if remaining is not None and len(remaining) > 1000:  # At least 1 second
-            print(f"📝 Transcribing final chunk...")
+            print("[INFO] Transcribing final chunk...")
             try:
                 temp_path = temp_dir / f"chunk_final_{int(time.time())}.wav"
                 self.audio_buffer.save_to_temp_wav(remaining, temp_path)
@@ -659,7 +659,7 @@ class MeetingBot:
                 })
                 temp_path.unlink()
             except Exception as e:
-                print(f"  ❌ Final chunk transcription error: {e}")
+                print(f"  [ERROR] Final chunk transcription error: {e}")
         
         print("✅ Transcription loop completed")
     
@@ -687,7 +687,7 @@ class MeetingBot:
     
     async def send_chat_disclaimer(self):
         """Send a professional disclaimer message in the meeting chat"""
-        print("💬 Sending chat disclaimer...")
+        print("[INFO] Sending chat disclaimer...")
         try:
             disclaimer = "SYSTEM: AI Meeting Assistant has joined. This session is being recorded for automated transcription and summary generation."
             
@@ -703,14 +703,14 @@ class MeetingBot:
                 
             elif self.config.platform.lower() in ["google_meet", "meet"]:
                 # Google Meet chat flow
-                print("  ⏳ Waiting to ensure meeting is fully loaded before opening chat...")
+                print("  [WAIT] Waiting to ensure meeting is fully loaded before opening chat...")
                 await asyncio.sleep(5)
                 
                 chat_button = self.page.locator('button[aria-label*="chat with everyone" i], button[aria-label*="chat" i]').first
                 try:
                     await chat_button.wait_for(state="visible", timeout=10000)
                     await chat_button.click()
-                    print("  ✓ Opened chat panel")
+                    print("  [SUCCESS] Opened chat panel")
                     
                     # WAIT for chat panel to expand
                     chat_input = self.page.locator('textarea[name="chatTextInput"], textarea[aria-label*="chat" i], aside textarea').first
@@ -729,23 +729,23 @@ class MeetingBot:
                     await asyncio.sleep(1)
                     sent_msg = self.page.locator(f'text="{disclaimer}"')
                     if await sent_msg.count() > 0:
-                        print("  ✅ Chat message verified in DOM.")
+                        print("  [SUCCESS] Chat message verified in DOM.")
                     else:
-                        print("  ⚠️ Chat message sent, but could not verify in DOM.")
+                        print("  [WARNING] Chat message sent, but could not verify in DOM.")
                 except Exception as e:
-                    print(f"  ⚠️ Explicit chat injection failed, trying keyboard generic fallback... ({e})")
+                    print(f"  [WARNING] Explicit chat injection failed, trying keyboard generic fallback... ({e})")
                     # Fallback generic injection
                     await self.page.keyboard.press("Tab")
                     await self.page.keyboard.type(disclaimer, delay=30)
                     await self.page.keyboard.press("Enter")
-                    print("  ✓ Disclaimer sent manually via keyboard")
+                    print("  [SUCCESS] Disclaimer sent manually via keyboard")
                 
         except Exception as e:
-            print(f"  ⚠️ Could not send chat disclaimer: {e}")
+            print(f"  [WARNING] Could not send chat disclaimer: {e}")
 
     async def stop_async(self):
         """Async implementation of stop signaling and Playwright cleanup"""
-        print("\n🛑 Stop signal received. Attempting clean meeting exit...")
+        print("\n[STOP] Stop signal received. Attempting clean meeting exit...")
         self.meeting_active = False
         self.is_recording = False
         self.stop_event.set() # Trigger immediate loop break
@@ -753,7 +753,7 @@ class MeetingBot:
         try:
             if self.page and not self.page.is_closed():
                 # PROMPT 4: Attempt graceful "Leave" click first
-                print("  ⏳ Clicking Leave Meeting button...")
+                print("  [WAIT] Clicking Leave Meeting button...")
                 if self.config.platform.lower() == "zoom":
                     leave_btn = self.page.locator('button:has-text("Leave"), button[aria-label="Leave"]')
                     if await leave_btn.count() > 0:
@@ -766,19 +766,19 @@ class MeetingBot:
                     if await leave_btn.count() > 0:
                         await leave_btn.first.click(timeout=3000)
                 
-                print("  ✓ Successfully clicked leave UI")
+                print("  [SUCCESS] Successfully clicked leave UI")
             
             # Immediately close the browser to avoid lingering windows and loops
             if self.browser:
                 await self.browser.close()
-                print("  ✓ Browser forcefully closed for instant termination")
+                print("  [SUCCESS] Browser forcefully closed for instant termination")
                 
         except Exception as e:
-            print(f"  ⚠️ Could not click leave button gracefully: {e}")
+            print(f"  [WARNING] Could not click leave button gracefully: {e}")
             
     def stop(self):
         """Signal the bot to stop and leave the meeting immediately"""
-        print("\n🛑 HARD STOP signal received from UI. Terminating immediately...")
+        print("\n[STOP] HARD STOP signal received from UI. Terminating immediately...")
         self.hard_stop_flag.set()
         self.stop_event.set()
         self.meeting_active = False
@@ -790,7 +790,7 @@ class MeetingBot:
                 self.audio_stream.stop()
                 self.audio_stream.close()
             except Exception as e:
-                print(f"  ⚠️ Error stopping audio stream: {e}")
+                print(f"  [WARNING] Error stopping audio stream: {e}")
                 
         # Run the async stop routine in the local event loop safely
         try:

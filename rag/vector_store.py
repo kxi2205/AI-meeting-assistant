@@ -33,7 +33,7 @@ class VectorStore:
             metadata={"description": "Meeting transcripts for semantic search", "hnsw:space": "cosine"}
         )
         
-        print("✓ Vector Store initialized")
+        print("[SUCCESS] Vector Store initialized")
     
     def add_meeting(self, meeting_id, transcript, metadata=None):
         """
@@ -68,10 +68,10 @@ class VectorStore:
                 metadatas=chunk_metadata
             )
             
-            print(f"✓ Added {len(chunks)} chunks for meeting {meeting_id}")
+            print(f"[SUCCESS] Added {len(chunks)} chunks for meeting {meeting_id}")
             
         except Exception as e:
-            print(f"❌ Error adding meeting to vector store: {e}")
+            print(f"[ERROR] Error adding meeting to vector store: {e}")
             raise
     
     def get_relevant_context(self, query, max_chunks=3):
@@ -100,7 +100,7 @@ class VectorStore:
             return context
             
         except Exception as e:
-            print(f"❌ Error retrieving context: {e}")
+            print(f"[ERROR] Error retrieving context: {e}")
             return ""
     
     def search_meetings(self, query, n_results=5):
@@ -121,7 +121,7 @@ class VectorStore:
             )
             return results
         except Exception as e:
-            print(f"❌ Error searching meetings: {e}")
+            print(f"[ERROR] Error searching meetings: {e}")
             return {'documents': [], 'metadatas': []}
     
     def delete_meeting(self, meeting_id):
@@ -139,9 +139,9 @@ class VectorStore:
             
             if results['ids']:
                 self.collection.delete(ids=results['ids'])
-                print(f"✓ Deleted {len(results['ids'])} chunks for meeting {meeting_id}")
+                print(f"[SUCCESS] Deleted {len(results['ids'])} chunks for meeting {meeting_id}")
         except Exception as e:
-            print(f"❌ Error deleting meeting: {e}")
+            print(f"[ERROR] Error deleting meeting: {e}")
     
     def _chunk_text(self, text):
         """

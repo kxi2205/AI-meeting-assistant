@@ -19,7 +19,7 @@ class SummaryAgent:
             max_retries=3
         )
         self.model = settings.GROQ_MODEL
-        print("✓ Summary Agent initialized with Groq")
+        print("[SUCCESS] Summary Agent initialized with Groq")
     
     def clean_transcript(self, raw_transcript: str, participants: str) -> str:
         """
@@ -27,7 +27,7 @@ class SummaryAgent:
         and lightly fix grammar without altering tone or over-summarizing.
         """
         try:
-            print("🧹 Post-processing transcript for proper noun correction...")
+            print("[INFO] Post-processing transcript for proper noun correction...")
             
             prompt = f"""You are an exact transcription editor. Your job is ONLY to fix phonetic misspellings of names and extremely obvious grammatical speech errors. 
 DO NOT summarize the text. DO NOT alter the original tone, meaning, or dialog flow. 
@@ -52,7 +52,7 @@ Return ONLY the cleaned transcript. Do not add any introductory or concluding te
             return response.choices[0].message.content.strip()
             
         except Exception as e:
-            print(f"❌ Transcript cleanup error: {e}")
+            print(f"[ERROR] Transcript cleanup error: {e}")
             return raw_transcript # Fail gracefully
 
     def generate_summary(self, transcript, meeting_context=None):
@@ -111,7 +111,7 @@ Keep it clear, concise, and actionable."""
             }
             
         except Exception as e:
-            print(f"❌ Summary generation error: {e}")
+            print(f"[ERROR] Summary generation error: {e}")
             raise
     
     def answer_question(self, transcript, question):
@@ -156,5 +156,5 @@ Provide a clear, concise answer based on the information in the transcript. If t
             return response.choices[0].message.content
             
         except Exception as e:
-            print(f"❌ Question answering error: {e}")
+            print(f"[ERROR] Question answering error: {e}")
             raise

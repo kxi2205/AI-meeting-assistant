@@ -30,7 +30,7 @@ class AudioTranscriber:
         )
         
         self.ffmpeg_available = True  # We don't need local FFmpeg anymore for native Python fallback to matter
-        print("✓ Groq Audio API initialized successfully")
+        print("[SUCCESS] Groq Audio API initialized successfully")
 
     def transcribe_audio(self, audio_path, language=None, prompt=""):
         """
@@ -73,11 +73,11 @@ class AudioTranscriber:
             # Save transcript to file
             self._save_transcript(audio_path, transcription['text'])
             
-            print(f"✓ Cloud Transcription complete ({len(transcription['text'])} characters)")
+            print(f"[SUCCESS] Cloud Transcription complete ({len(transcription['text'])} characters)")
             return transcription
             
         except Exception as e:
-            print(f"❌ Groq Transcription error: {e}")
+            print(f"[ERROR] Groq Transcription error: {e}")
             raise
     
     def _save_transcript(self, audio_path, text):
@@ -88,7 +88,7 @@ class AudioTranscriber:
         with open(transcript_path, 'w', encoding='utf-8') as f:
             f.write(text)
         
-        print(f"✓ Transcript saved to: {transcript_path}")
+        print(f"[SUCCESS] Transcript saved to: {transcript_path}")
     
     def get_model_info(self):
         """Get information about the loaded model"""

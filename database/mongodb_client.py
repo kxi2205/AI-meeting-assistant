@@ -25,10 +25,10 @@ class MeetingDatabase:
             
             # Test connection
             self.client.admin.command('ping')
-            print("✓ MongoDB connected successfully")
+            print("[SUCCESS] MongoDB connected successfully")
             
         except Exception as e:
-            print(f"❌ MongoDB connection error: {e}")
+            print(f"[ERROR] MongoDB connection error: {e}")
             raise
     
     def save_meeting(self, meeting_data):
@@ -44,10 +44,10 @@ class MeetingDatabase:
         try:
             meeting_data['created_at'] = datetime.now()
             result = self.meetings.insert_one(meeting_data)
-            print(f"✓ Meeting saved with ID: {result.inserted_id}")
+            print(f"[SUCCESS] Meeting saved with ID: {result.inserted_id}")
             return str(result.inserted_id)
         except Exception as e:
-            print(f"❌ Error saving meeting: {e}")
+            print(f"[ERROR] Error saving meeting: {e}")
             raise
     
     def get_meeting(self, meeting_id):
@@ -67,7 +67,7 @@ class MeetingDatabase:
                 meeting = self.meetings.find_one({'_id': ObjectId(meeting_id)})
             return meeting
         except Exception as e:
-            print(f"❌ Error retrieving meeting: {e}")
+            print(f"[ERROR] Error retrieving meeting: {e}")
             return None
     
     def get_all_meetings(self, limit=50):
@@ -88,7 +88,7 @@ class MeetingDatabase:
             )
             return meetings
         except Exception as e:
-            print(f"❌ Error retrieving meetings: {e}")
+            print(f"[ERROR] Error retrieving meetings: {e}")
             return []
     
     def delete_meeting(self, meeting_id):
@@ -103,9 +103,9 @@ class MeetingDatabase:
             self.meetings.delete_one({'meeting_id': meeting_id})
             # Delete associated action items
             self.action_items.delete_many({'meeting_id': meeting_id})
-            print(f"✓ Meeting {meeting_id} deleted")
+            print(f"[SUCCESS] Meeting {meeting_id} deleted")
         except Exception as e:
-            print(f"❌ Error deleting meeting: {e}")
+            print(f"[ERROR] Error deleting meeting: {e}")
     
     def save_action_item(self, action_item):
         """
@@ -123,7 +123,7 @@ class MeetingDatabase:
             result = self.action_items.insert_one(action_item)
             return str(result.inserted_id)
         except Exception as e:
-            print(f"❌ Error saving action item: {e}")
+            print(f"[ERROR] Error saving action item: {e}")
             raise
     
     def get_action_items(self, meeting_id=None, status=None):
@@ -147,7 +147,7 @@ class MeetingDatabase:
             items = list(self.action_items.find(query).sort('created_at', -1))
             return items
         except Exception as e:
-            print(f"❌ Error retrieving action items: {e}")
+            print(f"[ERROR] Error retrieving action items: {e}")
             return []
     
     def update_action_item_status(self, item_id, status):
@@ -163,9 +163,9 @@ class MeetingDatabase:
                 {'_id': ObjectId(item_id)},
                 {'$set': {'status': status, 'updated_at': datetime.now()}}
             )
-            print(f"✓ Action item {item_id} updated to {status}")
+            print(f"[SUCCESS] Action item {item_id} updated to {status}")
         except Exception as e:
-            print(f"❌ Error updating action item: {e}")
+            print(f"[ERROR] Error updating action item: {e}")
             
     def update_meeting_recipients(self, meeting_id, resolved_recipients, unresolved_participants=None):
         """
@@ -188,9 +188,9 @@ class MeetingDatabase:
                 {'meeting_id': meeting_id},
                 {'$set': update_data}
             )
-            print(f"✓ Recipients updated for meeting {meeting_id}")
+            print(f"[SUCCESS] Recipients updated for meeting {meeting_id}")
         except Exception as e:
-            print(f"❌ Error updating recipients: {e}")
+            print(f"[ERROR] Error updating recipients: {e}")
             
     def update_meeting_emails(self, meeting_id, resolved_emails):
         """Save resolved emails mapping to the meeting document."""
@@ -199,9 +199,9 @@ class MeetingDatabase:
                 {'meeting_id': meeting_id},
                 {'$set': {'resolved_emails': resolved_emails, 'updated_at': datetime.now()}}
             )
-            print(f"✓ Resolved emails updated for meeting {meeting_id}")
+            print(f"[SUCCESS] Resolved emails updated for meeting {meeting_id}")
         except Exception as e:
-            print(f"❌ Error updating meeting emails: {e}")
+            print(f"[ERROR] Error updating meeting emails: {e}")
             
     def add_email_event(self, meeting_id, history_event):
         """Append an email dispatch record to the meeting's send history."""
@@ -211,9 +211,9 @@ class MeetingDatabase:
                 {'meeting_id': meeting_id},
                 {'$push': {'email_send_history': history_event}, '$set': {'updated_at': datetime.now()}}
             )
-            print(f"✓ Added email event history for meeting {meeting_id}")
+            print(f"[SUCCESS] Added email event history for meeting {meeting_id}")
         except Exception as e:
-            print(f"❌ Error adding email event: {e}")
+            print(f"[ERROR] Error adding email event: {e}")
     
     def get_statistics(self):
         """
@@ -237,7 +237,7 @@ class MeetingDatabase:
                 'pending_actions': pending_actions
             }
         except Exception as e:
-            print(f"❌ Error getting statistics: {e}")
+            print(f"[ERROR] Error getting statistics: {e}")
             return {
                 'total_meetings': 0,
                 'uploaded_recordings': 0,
@@ -270,10 +270,10 @@ class MeetingDatabase:
                 upsert=True
             )
             # Log success but DO NOT log the token data
-            print(f"✓ Connected account saved for {email}")
+            print(f"[SUCCESS] Connected account saved for {email}")
             return True
         except Exception as e:
-            print(f"❌ Error saving connected account: {e}")
+            print(f"[ERROR] Error saving connected account: {e}")
             return False
 
     def get_connected_accounts(self):
@@ -284,7 +284,7 @@ class MeetingDatabase:
         try:
             return list(self.connected_accounts.find({}, {'_id': 0}).sort('connected_at', -1))
         except Exception as e:
-            print(f"❌ Error retrieving connected accounts: {e}")
+            print(f"[ERROR] Error retrieving connected accounts: {e}")
             return []
 
     def get_connected_account(self, email):
@@ -294,7 +294,7 @@ class MeetingDatabase:
         try:
             return self.connected_accounts.find_one({'email': email}, {'_id': 0})
         except Exception as e:
-            print(f"❌ Error retrieving connected account: {e}")
+            print(f"[ERROR] Error retrieving connected account: {e}")
             return None
 
     def delete_connected_account(self, email):
@@ -304,11 +304,11 @@ class MeetingDatabase:
         try:
             result = self.connected_accounts.delete_one({'email': email})
             if result.deleted_count > 0:
-                print(f"✓ Connected account deleted for {email}")
+                print(f"[SUCCESS] Connected account deleted for {email}")
                 return True
             return False
         except Exception as e:
-            print(f"❌ Error deleting connected account: {e}")
+            print(f"[ERROR] Error deleting connected account: {e}")
             return False
 
     def update_account_tokens(self, email, new_access_token, new_refresh_token=None, new_expiry=None):
@@ -330,10 +330,10 @@ class MeetingDatabase:
                 {'$set': update_fields}
             )
             # Log success but DO NOT log the token data
-            print(f"✓ Tokens refreshed and saved for {email}")
+            print(f"[SUCCESS] Tokens refreshed and saved for {email}")
             return True
         except Exception as e:
-            print(f"❌ Error updating account tokens: {e}")
+            print(f"[ERROR] Error updating account tokens: {e}")
             return False
 
 # Create a global database instance
