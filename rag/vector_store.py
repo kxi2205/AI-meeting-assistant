@@ -61,10 +61,17 @@ class VectorStore:
                 }
                 chunk_metadata.append(meta)
             
+            meta_text = f"""
+            Title: {metadata.get('title', '')}
+            Date: {metadata.get('date', '')}
+            Participants: {metadata.get('participants', '')}
+            """
+
+            chunks_with_metadata = [meta_text + "\n" + chunk for chunk in chunks]
             # Add to collection
             self.collection.add(
                 ids=chunk_ids,
-                documents=chunks,
+                documents=chunks_with_metadata,
                 metadatas=chunk_metadata
             )
             
