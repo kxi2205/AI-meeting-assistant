@@ -6,7 +6,7 @@ import sys
 import time
 import numpy as np
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
 
 # Add parent directory to path
@@ -25,6 +25,9 @@ from integrations.meeting_bot import join_and_capture_audio, MeetingConfig, Meet
 from integrations.email_sender import EmailSender
 import config.settings as settings
 import threading
+from utils.deadline_parser import get_closest_deadline_warning, parse_deadline
+from utils.assignee_resolver import resolve_assignee_email
+from integrations.calendar_reminder import create_reminder_event
 
 try:
     import sounddevice as sd
@@ -97,6 +100,29 @@ def main():
                 st.error(f"Could not load stats: {e}")
                 import traceback
                 st.code(traceback.format_exc())
+        
+        # Closest Deadline Warning Card
+        try:
+            deadline_warning = get_closest_deadline_warning(db)
+            if deadline_warning:
+                urgency = deadline_warning['urgency']
+                label = deadline_warning['label']
+                task = deadline_warning['task']
+                assignee = deadline_warning['assignee']
+                
+                warning_text = f"**⏰ {label}**\n\n"
+                warning_text += f"📋 {task}\n\n"
+                warning_text += f"👤 {assignee}"
+                
+                if urgency == 'overdue':
+                    st.error(warning_text)
+                elif urgency in ('due_today', 'due_tomorrow'):
+                    st.warning(warning_text)
+                else:
+                    st.info(warning_text)
+        except Exception as e:
+            # Silently skip — deadline warning is non-critical
+            print(f"[WARNING] Deadline warning card error: {e}")
         
         # Integrations
         with st.expander("⚙️ Integrations", expanded=False):
@@ -209,42 +235,58 @@ def live_meeting_page():
         join_live_meeting(None, None, None, None, None, reconnect=True)
         return
 
-    # Silent internal audio device detection (No UI)
-    if AUDIO_AVAILABLE and 'selected_device_index' not in st.session_state:
-        try:
-            devices = sd.query_devices()
-            default_out_idx = sd.default.device[1]
-            default_out_name = devices[default_out_idx]['name'].lower()
-            
-            input_devices = []
-            for i, device in enumerate(devices):
-                if device['max_input_channels'] > 0:
-                    name = device['name'].lower()
-                    # Explicitly exclude mics, headsets, and bluetooth
-                    if any(bad in name for bad in ['mic', 'headset', 'bluetooth', 'hands-free', 'handsfree']):
-                        continue
-                    input_devices.append({'index': i, 'name': name})
-            
-            candidates = []
-            # 1. Map active output to correct input
-            if "cable" in default_out_name:
-                candidates.extend([d['index'] for d in input_devices if 'cable' in d['name']])
-            elif "headphone" in default_out_name or "speaker" in default_out_name or "realtek" in default_out_name:
-                candidates.extend([d['index'] for d in input_devices if 'stereo mix' in d['name']])
+    # 3. Audio Device Detection and Manual Override
+    if AUDIO_AVAILABLE:
+        with st.sidebar.expander("🎤 Audio Configuration", expanded=False):
+            try:
+                devices = sd.query_devices()
+                input_devices = []
+                for i, d in enumerate(devices):
+                    if d['max_input_channels'] > 0:
+                        name = d['name']
+                        # Filter out common mic/headset keywords for safety
+                        if any(k in name.lower() for k in ['mic', 'headset', 'bluetooth', 'hands-free', 'handsfree']):
+                            continue
+                        input_devices.append({'index': i, 'name': name})
                 
-            # Fallback ONLY to loopbacks, strictly no mics
-            for keyword in ['cable', 'stereo mix', 'loopback', 'blackhole']:
-                candidates.extend([d['index'] for d in input_devices if keyword in d['name'] and d['index'] not in candidates])
+                device_names = [f"[{d['index']}] {d['name']}" for d in input_devices]
                 
-            st.session_state['selected_device_index'] = candidates[0] if candidates else None
-            st.session_state['audio_candidates'] = candidates
-        except Exception:
-            st.session_state['selected_device_index'] = None
-            st.session_state['audio_candidates'] = []
-    elif not AUDIO_AVAILABLE:
-        st.session_state['selected_device_index'] = None
-        st.session_state['audio_candidates'] = []
-        
+                # Auto-selection logic (if not already selected)
+                if 'selected_device_index' not in st.session_state or st.session_state.get('selected_device_index') is None:
+                    candidates = []
+                    for keyword in ['cable', 'stereo mix', 'loopback', 'blackhole', 'monitor']:
+                        candidates.extend([d['index'] for d in input_devices if keyword in d['name'].lower()])
+                    
+                    if candidates:
+                        st.session_state['selected_device_index'] = candidates[0]
+                
+                # UI Selector
+                current_idx = st.session_state.get('selected_device_index')
+                default_idx = 0
+                if current_idx is not None:
+                    try:
+                        default_idx = [d['index'] for d in input_devices].index(current_idx)
+                    except ValueError:
+                        default_idx = 0
+                
+                if device_names:
+                    selected_label = st.selectbox(
+                        "Loopback Device",
+                        options=device_names,
+                        index=default_idx,
+                        help="Select your virtual audio device (Stereo Mix or VB-Cable). Microphones are hidden for privacy."
+                    )
+                    st.session_state['selected_device_index'] = int(selected_label.split(']')[0][1:])
+                else:
+                    st.warning("⚠️ No loopback devices detected. Please ensure Stereo Mix or VB-Cable is enabled in Windows Sound Settings.")
+                    if st.button("Refresh Audio Devices"):
+                        st.rerun()
+                
+            except Exception as e:
+                st.error(f"Audio Error: {e}")
+    else:
+        st.sidebar.error("❌ sounddevice not installed. Audio capture unavailable.")
+
     device_ready = AUDIO_AVAILABLE and st.session_state.get('selected_device_index') is not None
     
     tab_calendar, tab_manual = st.tabs(["📅 Calendar Mode", "✍️ Manual Mode"])
@@ -1206,15 +1248,158 @@ def render_email_dispatch_modal(meeting):
             
             if results["successes"]:
                 st.success(f"Sent successfully to: {', '.join(results['successes'])}")
+            
             if results["invalid_format"]:
                 st.warning(f"Invalid format (skipped): {', '.join(results['invalid_format'])}")
             if results["failures"]:
                 st.error(f"Failed to deliver: {', '.join(results['failures'])}")
+
+@st.dialog("🗓️ Create Calendar Invite", width="large")
+def render_reminder_creation_modal(meeting: dict, target_item_id: str = None):
+    """
+    Review modal for creating Google Calendar invites.
+    If target_item_id is provided, only shows that specific task.
+    """
+    st.markdown(f"### Create Invite for: **{meeting.get('title', 'Meeting')}**")
+    st.caption("This will create a reminder event on your calendar and invite the assignee as an attendee.")
+    
+    # Check if a Google account is connected
+    accounts = db.get_connected_accounts()
+    if not accounts:
+        st.error("No Google accounts connected. Go to **Settings > Integrations** to connect an account.")
+        return
+    
+    # Let user pick which account to use if multiple
+    if len(accounts) > 1:
+        account_options = {acc['email']: acc for acc in accounts}
+        selected_email = st.selectbox("Select Organizer Account", options=list(account_options.keys()))
+        selected_account = account_options[selected_email]
+    else:
+        selected_account = accounts[0]
+        st.info(f"Using Organizer Account: **{selected_account['email']}**")
+
+    # Check for write scope
+    granted_scopes = selected_account.get('granted_scopes', [])
+    if 'https://www.googleapis.com/auth/calendar.events' not in granted_scopes:
+        st.warning("⚠️ Your account was connected with read-only permissions.")
+        st.markdown("Please disconnect and reconnect in **Settings > Integrations** to enable reminder creation.")
+        return
+
+    # Fetch action items
+    actions = db.get_action_items(meeting_id=meeting['meeting_id'])
+    if not actions:
+        st.info("No action items found for this meeting.")
+        return
+
+    # Filter by target item if provided
+    if target_item_id:
+        actions = [a for a in actions if str(a['_id']) == str(target_item_id)]
+        if not actions:
+            st.error("Selected task not found.")
+            return
+        st.info("Showing specific task only.")
+        if st.button("Show all tasks from this meeting", use_container_width=False):
+            st.session_state.at_show_all_m = meeting['meeting_id']
+            st.rerun()
+
+    if st.session_state.get('at_show_all_m') == meeting['meeting_id']:
+        # Reset and show all (this logic is simplified for the dialog scope)
+        pass 
+
+    st.divider()
+    
+    # Process and display items
+    for idx, item in enumerate(actions):
+        with st.container(border=True):
+            col1, col2 = st.columns([2, 1])
             
-            if not results["failures"] and results["successes"]:
-                import time
-                time.sleep(2)
-                st.rerun()
+            with col1:
+                st.markdown(f"**Task:** {item['task']}")
+                if item.get('evidence'):
+                    st.caption(f"Context: \"{item['evidence']}\"")
+            
+            with col2:
+                # 1. Resolve email
+                resolved_email, source = resolve_assignee_email(item.get('assignee_name', ''), meeting)
+                
+                # 2. Parse deadline (Suggested Fallback logic)
+                raw_deadline = item.get('deadline', '')
+                parsed_date = parse_deadline(raw_deadline)
+                is_suggested = False
+                
+                if not parsed_date:
+                    # Default to 7 days from today if vague/missing
+                    parsed_date = datetime.now().replace(hour=17, minute=0, second=0, microsecond=0) + timedelta(days=7)
+                    is_suggested = True
+                
+                # Input for Email
+                assignee_email = st.text_input(
+                    "Assignee Email", 
+                    value=resolved_email or "", 
+                    key=f"email_input_{idx}_{meeting['meeting_id']}",
+                    help=f"Source: {source or 'Unresolved'}"
+                )
+                
+                # Input for Deadline
+                label = "Deadline" + (" (Suggested: T+7d)" if is_suggested else "")
+                deadline_val = st.date_input(
+                    label, 
+                    value=parsed_date.date(),
+                    key=f"date_input_{idx}_{meeting['meeting_id']}"
+                )
+                
+                # Status and Creation
+                rem_status = item.get('reminder_status', 'not_created')
+                
+                if rem_status == 'created':
+                    st.success("✅ Invite sent")
+                    if st.button("Re-send Invite", key=f"resend_{idx}_{meeting['meeting_id']}", use_container_width=True):
+                        st.session_state[f"force_retry_{idx}_{meeting['meeting_id']}"] = True
+                
+                if rem_status != 'created' or st.session_state.get(f"force_retry_{idx}_{meeting['meeting_id']}"):
+                    if not assignee_email:
+                        st.warning("Email required to send invite")
+                    
+                    if st.button("🚀 Create Calendar Invite", key=f"create_{idx}_{meeting['meeting_id']}", disabled=not assignee_email, use_container_width=True, type="primary"):
+                        # Combine date and time (default to 5 PM)
+                        target_dt = datetime.combine(deadline_val, datetime.min.time()).replace(hour=17)
+                        
+                        # Add disclaimer if suggested
+                        item_copy = item.copy()
+                        if is_suggested:
+                            item_copy['evidence'] = (item.get('evidence', '') + 
+                                "\n\n[NOTE] No explicit deadline was detected in the meeting transcript. "
+                                "This reminder date was defaulted to 7 days after the meeting by the organizer. "
+                                "If this is incorrect, please contact the assigner.")
+                        
+                        with st.spinner("Creating invite..."):
+                            result = create_reminder_event(
+                                account_email=selected_account['email'],
+                                action_item=item_copy,
+                                deadline=target_dt,
+                                attendee_email=assignee_email,
+                                meeting_title=meeting.get('title', 'Meeting'),
+                                meeting_date=meeting.get('date', '')[:10],
+                                meeting_id=meeting['meeting_id']
+                            )
+                            
+                            if result['success']:
+                                st.success("Invite sent!")
+                                # Update DB
+                                update_data = {
+                                    'reminder_status': 'created',
+                                    'calendar_event_id': result['event_id'],
+                                    'reminder_created_at': datetime.now(),
+                                    'reminder_created_by_account': selected_account['email'],
+                                    'resolved_assignee_email': assignee_email
+                                }
+                                db.action_items.update_one({'_id': item['_id']}, {'$set': update_data})
+                                if f"force_retry_{idx}_{meeting['meeting_id']}" in st.session_state:
+                                    del st.session_state[f"force_retry_{idx}_{meeting['meeting_id']}"]
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                st.error(f"Error: {result['error']}")
 
 def past_meetings_page():
     """View past meetings and ask questions"""
@@ -1272,10 +1457,13 @@ def past_meetings_page():
                 st.markdown(f"**Meeting:** {title} &nbsp;|&nbsp; **Date:** {meeting.get('date', 'Unknown')[:19]} &nbsp;|&nbsp; **Duration:** {meeting.get('duration', 0):.1f}s")
                 st.markdown(f"**Participants:** {', '.join(meeting.get('participants', ['Not specified']))}")
                 
-                _, btn_col, del_col = st.columns([4, 1, 1])
+                _, btn_col, rem_col, del_col = st.columns([3, 1, 1, 1])
                 with btn_col:
                     if st.button("✉️ Send Summary", key=f"email_{meeting['meeting_id']}", use_container_width=True):
                         render_email_dispatch_modal(meeting)
+                with rem_col:
+                    if st.button("📅 Reminders", key=f"remind_{meeting['meeting_id']}", use_container_width=True):
+                        render_reminder_creation_modal(meeting)
                 with del_col:
                     if st.button("🗑️ Delete", key=f"del_{meeting['meeting_id']}", use_container_width=True):
                         with st.spinner("Removing..."):
@@ -1405,58 +1593,183 @@ def action_items_page():
     """View and manage action items"""
     st.header("Action Tracker")
     
+    # Closest Deadline Warning Banner
     try:
-        # Filters
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            status_filter = st.selectbox("Status", ["All", "pending", "completed", "in_progress"])
-        with col2:
-            owner_filter = st.text_input("Owner", placeholder="Filter by owner...")
-        
-        # Get action items
-        status = None if status_filter == "All" else status_filter
-        all_items = db.get_action_items(status=status)
-        
-        if owner_filter:
-            all_items = [item for item in all_items if 
-                        owner_filter.lower() in item.get('owner', '').lower()]
-        
+        deadline_warning = get_closest_deadline_warning(db)
+        if deadline_warning:
+            urgency = deadline_warning['urgency']
+            label = deadline_warning['label']
+            task = deadline_warning['task']
+            assignee = deadline_warning['assignee']
+            deadline_date = deadline_warning['deadline_date']
+            
+            banner_text = f"**⏰ Closest Deadline: {label}**  \n"
+            banner_text += f"📋 **Task:** {task}  \n"
+            banner_text += f"👤 **Assignee:** {assignee}  \n"
+            banner_text += f"📅 **Deadline:** {deadline_date.strftime('%B %d, %Y')}"
+            
+            if urgency == 'overdue':
+                st.error(banner_text)
+            elif urgency in ('due_today', 'due_tomorrow'):
+                st.warning(banner_text)
+            else:
+                st.info(banner_text)
+            
+            st.divider()
+    except Exception as e:
+        # Silently skip — deadline warning is non-critical
+        print(f"[WARNING] Action Tracker deadline banner error: {e}")
+    
+    try:
+        # 1. Get all action items
+        all_items = db.get_action_items()
         if not all_items:
             st.info("No action items found")
             return
-        
-        # Display items
-        st.write(f"Found {len(all_items)} action item(s)")
-        
+
+        # 2. Group by Meeting
+        from collections import defaultdict
+        meeting_groups = defaultdict(list)
         for item in all_items:
-            col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
+            m_id = item.get('meeting_id', 'unlinked')
+            meeting_groups[m_id].append(item)
+        
+        # 3. Get meeting metadata for headers
+        meeting_metadata = {}
+        for m_id in meeting_groups.keys():
+            if m_id != 'unlinked':
+                m_obj = db.get_meeting(m_id)
+                if m_obj:
+                    meeting_metadata[m_id] = m_obj
+        
+        # Sort meeting IDs by date (newest first)
+        sorted_m_ids = sorted(
+            meeting_groups.keys(), 
+            key=lambda mid: meeting_metadata.get(mid, {}).get('date', '1970-01-01'), 
+            reverse=True
+        )
+
+        # 4. Filter logic (Owner only)
+        owner_filter = st.text_input("Filter by Owner/Assignee", placeholder="Type a name to filter...")
+        if owner_filter:
+            for m_id in sorted_m_ids:
+                meeting_groups[m_id] = [item for item in meeting_groups[m_id] if 
+                                       (owner_filter.lower() in str(item.get('owner', '') or '').lower()) or
+                                       (owner_filter.lower() in str(item.get('assignee_name', '') or '').lower())]
+            # Remove empty groups
+            sorted_m_ids = [mid for mid in sorted_m_ids if meeting_groups[mid]]
+
+        # 5. Pagination (5 meetings per page) - Arrow Wise Style
+        MEETINGS_PER_PAGE = 5
+        total_pages = (len(sorted_m_ids) + MEETINGS_PER_PAGE - 1) // MEETINGS_PER_PAGE
+        
+        if "at_page" not in st.session_state:
+            st.session_state.at_page = 1
             
-            with col1:
-                priority_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}
-                emoji = priority_emoji.get(item.get('priority', 'medium'), '⚪')
-                st.markdown(f"**{emoji} {item['task']}**")
-            
-            with col2:
-                st.caption(f"👤 {item.get('owner', 'Unassigned')}")
-            
-            with col3:
-                st.caption(f"📅 {item.get('deadline', 'N/A')}")
-            
-            with col4:
-                current_status = item.get('status', 'pending')
-                new_status = st.selectbox(
-                    "Status",
-                    ["pending", "in_progress", "completed"],
-                    index=["pending", "in_progress", "completed"].index(current_status),
-                    key=f"status_{item['_id']}",
-                    label_visibility="collapsed"
-                )
-                
-                if new_status != current_status:
-                    db.update_action_item_status(item['_id'], new_status)
+        if total_pages > 1:
+            pcol1, pcol2, pcol3, pcol4 = st.columns([1, 1, 1, 10])
+            with pcol1:
+                if st.button("<", disabled=(st.session_state.at_page <= 1)):
+                    st.session_state.at_page -= 1
                     st.rerun()
+            with pcol2:
+                st.markdown(f"### {st.session_state.at_page}")
+            with pcol3:
+                if st.button(">", disabled=(st.session_state.at_page >= total_pages)):
+                    st.session_state.at_page += 1
+                    st.rerun()
+            st.caption(f"Showing page {st.session_state.at_page} of {total_pages} ({len(sorted_m_ids)} meetings)")
+        else:
+            st.session_state.at_page = 1
+            
+        start_idx = (st.session_state.at_page - 1) * MEETINGS_PER_PAGE
+        end_idx = start_idx + MEETINGS_PER_PAGE
+        page_m_ids = sorted_m_ids[start_idx:end_idx]
+
+        # 6. Display Groups
+        for m_id in page_m_ids:
+            items = meeting_groups[m_id]
+            m_meta = meeting_metadata.get(m_id, {})
+            
+            title = m_meta.get('title', 'Unlinked Actions') if m_id != 'unlinked' else "Unlinked Actions"
+            date = m_meta.get('date', '')[:10] if m_id != 'unlinked' else ""
+            
+            st.markdown(f"### {title}  `{date}`")
+            
+            # Limiting: Show max 10 tasks initially
+            LIMIT = 10
+            show_all = st.checkbox(f"Show all {len(items)} tasks", key=f"show_all_{m_id}") if len(items) > LIMIT else True
+            display_items = items if show_all else items[:LIMIT]
+            
+            for item in display_items:
+                with st.container(border=True):
+                    c1, c2, c3, c4, c5 = st.columns([2.5, 1, 1, 1, 1])
+                    
+                    # Status Lifecycle logic
+                    status = item.get('status', 'pending')
+                    rem_status = item.get('reminder_status', 'not_created')
+                    
+                    # Compute deadline urgency
+                    deadline_str = item.get('deadline', 'N/A')
+                    parsed_deadline = parse_deadline(deadline_str)
+                    
+                    with c1:
+                        priority_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+                        emoji = priority_emoji.get(item.get('priority', 'medium'), '⚪')
+                        st.markdown(f"**{emoji} {item['task']}**")
+                        
+                        # Re-add Calendar button per task
+                        m_id_link = item.get('meeting_id')
+                        if m_id_link and m_id_link != 'unlinked':
+                            if st.button("📅 Create Invite", key=f"rem_track_{item['_id']}", use_container_width=False, type="secondary", help="Create calendar invite for this item"):
+                                m_obj = db.get_meeting(m_id_link)
+                                if m_obj:
+                                    render_reminder_creation_modal(m_obj, target_item_id=item['_id'])
+                    
+                    with c2:
+                        assignee = item.get('owner') or item.get('assignee_name') or 'Unassigned'
+                        st.caption(f"👤 {assignee}")
+                    
+                    with c3:
+                        st.caption(f"📅 {item.get('deadline', 'N/A')}")
+                    
+                    with c4:
+                        # Derive Status Label
+                        if status == 'completed':
+                            st.success("✅ Completed")
+                        elif rem_status == 'created':
+                            st.info("🔵 Invite Sent")
+                        elif parsed_deadline:
+                            now = datetime.now()
+                            if parsed_deadline < now:
+                                st.error("🔴 Overdue")
+                            elif parsed_deadline.date() == now.date():
+                                st.warning("🟠 Due Today")
+                            else:
+                                st.success("🟢 Upcoming")
+                        else:
+                            st.markdown("`🟡 Pending` ")
+                    
+                    with c5:
+                        # Minimal completion toggle
+                        if status != 'completed':
+                            if st.button("Mark Done", key=f"done_{item['_id']}", use_container_width=True):
+                                db.update_action_item_status(item['_id'], 'completed')
+                                st.rerun()
+                        else:
+                            if st.button("Undo", key=f"undo_{item['_id']}", use_container_width=True):
+                                db.update_action_item_status(item['_id'], 'pending')
+                                st.rerun()
+
+            if not show_all:
+                st.caption(f"+ {len(items) - LIMIT} more tasks in this meeting.")
             
             st.divider()
+
+    except Exception as e:
+        st.error(f"Error loading action items: {e}")
+        import traceback
+        st.code(traceback.format_exc())
         
     except Exception as e:
         st.error(f"Error loading action items: {e}")

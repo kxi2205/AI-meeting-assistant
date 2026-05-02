@@ -10,7 +10,7 @@ import config.settings as settings
 class GoogleAuthManager:
     """Manages Google OAuth 2.0 flows and token management for connected accounts."""
     SCOPES = [
-        'https://www.googleapis.com/auth/calendar.events.readonly',
+        'https://www.googleapis.com/auth/calendar.events', # read + write (verified minimum for events.insert)
         'https://www.googleapis.com/auth/userinfo.email',
         'openid'
     ]
@@ -47,6 +47,13 @@ class GoogleAuthManager:
                 scopes=self.SCOPES
             )
             
+            # DEBUG OAuth scopes verification
+            print(f"DEBUG OAuth scopes: {self.SCOPES}")
+            if hasattr(flow, "oauth2session"):
+                print(f"DEBUG Flow scopes: {getattr(flow, 'oauth2session', None).scope}")
+            else:
+                print("DEBUG Flow scopes: no oauth2session")
+            
             # This opens a browser window
             creds = flow.run_local_server(port=0, access_type='offline', prompt='consent')
             
@@ -57,9 +64,17 @@ class GoogleAuthManager:
             # Let's try to get it from the id_token.
             email = "Unknown"
             if creds.id_token:
-                import jwt # Need PyJWT for this
                 try:
-                    decoded = jwt.decode(creds.id_token, options={"verify_signature": False})
+                    import base64
+                    # ID tokens are JWTs: [header].[payload].[signature]
+                    _, payload_b64, _ = creds.id_token.split('.')
+                    # Add padding to base64 string if needed
+                    missing_padding = len(payload_b64) % 4
+                    if missing_padding:
+                        payload_b64 += '=' * (4 - missing_padding)
+                    
+                    payload_json = base64.b64decode(payload_b64).decode('utf-8')
+                    decoded = json.loads(payload_json)
                     email = decoded.get('email', 'Unknown')
                 except Exception as e:
                     print(f"Could not extract email from id_token: {e}")
@@ -83,6 +98,7 @@ class GoogleAuthManager:
                 'access_token': creds.token,
                 'refresh_token': creds.refresh_token,
                 'expiry': creds.expiry.isoformat() if creds.expiry else None,
+                'granted_scopes': creds.scopes or self.SCOPES,
                 # We do not store client_id or client_secret here!
             }
             
@@ -134,6 +150,17 @@ class GoogleAuthManager:
                 return None
                 
         return creds if creds.valid else None
+
+    def check_write_scope(self, email):
+        """
+        Check if the connected account has the required write scope for calendar events.
+        """
+        account = db.get_connected_account(email)
+        if not account:
+            return False
+            
+        granted = account.get('granted_scopes', [])
+        return 'https://www.googleapis.com/auth/calendar.events' in granted
 
     def get_upcoming_events(self, email):
         """

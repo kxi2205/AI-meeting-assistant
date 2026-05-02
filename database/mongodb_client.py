@@ -167,6 +167,25 @@ class MeetingDatabase:
         except Exception as e:
             print(f"[ERROR] Error updating action item: {e}")
             
+    def update_action_item_reminder(self, item_id, reminder_data):
+        """
+        Update reminder-related metadata for an action item.
+        
+        Args:
+            item_id: Action item ID
+            reminder_data: Dict with fields like reminder_status, calendar_event_id, 
+                          resolved_assignee_email, assignee_resolution_source, etc.
+        """
+        try:
+            reminder_data['updated_at'] = datetime.now()
+            self.action_items.update_one(
+                {'_id': ObjectId(item_id)},
+                {'$set': reminder_data}
+            )
+            print(f"[SUCCESS] Action item reminder data updated for {item_id}")
+        except Exception as e:
+            print(f"[ERROR] Error updating action item reminder: {e}")
+            
     def update_meeting_recipients(self, meeting_id, resolved_recipients, unresolved_participants=None):
         """
         Save resolved and unresolved recipients to the meeting document.

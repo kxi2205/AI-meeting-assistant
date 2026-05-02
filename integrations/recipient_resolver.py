@@ -25,7 +25,7 @@ class RecipientResolver:
         if self.google_service:
             return self.google_service
             
-        scopes = ['https://www.googleapis.com/auth/calendar.events.readonly']
+        scopes = ['https://www.googleapis.com/auth/calendar.events']
         creds = None
         
         if os.path.exists(self.google_token_path):

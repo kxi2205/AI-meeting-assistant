@@ -2,6 +2,8 @@
 
 Advanced Multi-Agent RAG System for Automated Meeting Intelligence.
 
+---
+
 ## 👥 Quick Start for Teammates
 
 1. **Environment Setup**:
@@ -20,43 +22,45 @@ Advanced Multi-Agent RAG System for Automated Meeting Intelligence.
 
 ---
 
-## 📋 Prerequisites
-
-- **Python**: 3.12+
-- **Database**: MongoDB Atlas (Free M0)
-- **LLM**: Groq API Key (Llama 3.3 70B)
-- **Audio**: FFmpeg installed and in System PATH
-- **Browser**: Playwright Chromium (`playwright install chromium`)
-- **Audio Capture**: Virtual Loopback (Stereo Mix or VB-Audio Cable)
-
----
-
 ## 🏗️ System Architecture
 
-- **Speech-to-Text**: OpenAI Whisper (Base)
-- **LLM Engine**: Groq Cloud (Llama 3.3 70B)
-- **Vector Store**: ChromaDB (all-MiniLM-L6-v2 embeddings)
-- **Metadata DB**: MongoDB Atlas
-- **UI Framework**: Streamlit 1.57.0
+The AI Meeting Assistant is built on a modular, multi-agent architecture:
+
+- **Speech-to-Text**: Local OpenAI Whisper (Base) for high-accuracy transcriptions.
+- **LLM Engine**: Groq Cloud (Llama 3.3 70B) for near-instant summary and action item extraction.
+- **Vector Store**: ChromaDB with `all-MiniLM-L6-v2` embeddings for semantic RAG search.
+- **Metadata Storage**: MongoDB Atlas for persistent meeting archives and task tracking.
+- **Automation**: Playwright-based bot for joining and recording browser-based meetings.
+- **UI Framework**: Streamlit for a fast, responsive intelligence dashboard.
 
 ---
 
-## 🚀 Installation
+## 🔇 Troubleshooting: Audio Loopback Issues
 
-### 1. Python & Dependencies
-```bash
-python -m venv .venv
-source .venv/bin/activate  # macOS/Linux
-# OR
-.\.venv\Scripts\Activate.ps1 # Windows
-pip install -r requirements.txt
-playwright install chromium
-```
+If you see the error **"Loopback device not found"** or the transcription is empty, follow this guide to set up your system correctly.
 
-### 2. FFmpeg Setup
-- **Windows**: `winget install --id Gyan.FFmpeg`
-- **macOS**: `brew install ffmpeg`
-- **Linux**: `sudo apt install ffmpeg`
+### 1. Enabling "Stereo Mix" (Easiest)
+Windows has a built-in loopback device, but it is often disabled by default.
+1. Right-click the **Sound Icon** in the taskbar > **Sound Settings**.
+2. Scroll down to **More sound settings** (on Windows 11) or **Recording** tab.
+3. Right-click in the list and check **"Show Disabled Devices"**.
+4. If **Stereo Mix** appears, right-click it and select **Enable**.
+5. **CRITICAL**: Right-click Stereo Mix > **Set as Default Device**.
+
+### 2. Using VB-Audio Cable (Recommended)
+If Stereo Mix isn't available or is noisy, use a virtual cable:
+1. Download and install [VB-CABLE Virtual Audio Cable](https://vb-audio.com/Cable/).
+2. Restart your computer after installation.
+3. Set **CABLE Input** as your **Playback Default**.
+4. Set **CABLE Output** as your **Recording Default**.
+
+### 3. Verification inside the App
+Once enabled/installed, use the **manual selector** in the app:
+1. Go to the **Join Session** tab in the sidebar.
+2. Open the **"🎤 Audio Configuration"** expander.
+3. Click **"Refresh Devices"**.
+4. Select **"Stereo Mix"** or **"CABLE Output"** from the dropdown.
+5. If you see a green "✅ Audio loopback device ready" message, you are good to go!
 
 ---
 
@@ -68,38 +72,36 @@ ai-meeting-assistant/
 ├── audio_processing/   # Whisper STT integration
 ├── config/             # Settings & Environment management
 ├── database/           # MongoDB Atlas client
-├── integrations/       # Meeting Bot (Playwright) & Email
+├── integrations/       # Meeting Bot (Playwright), Calendar & Email
 ├── rag/                # ChromaDB vector store
 ├── ui/                 # Streamlit interface
+├── utils/              # Deadline parsing & Assignee resolution
 └── data/               # Local storage for audio & vectors
 ```
 
 ---
 
-## 🎯 Core Features
+## 🚀 Full Installation Details
 
-- **Live Meeting Bot**: Joins Zoom/Meet via Playwright, captures system audio.
-- **Automated Transcription**: Whisper-based local/cloud transcription.
-- **Multi-Agent Analysis**: Summary generation and Action Item extraction.
-- **RAG Q&A**: Semantic search across meeting transcripts using ChromaDB.
-- **Meeting Archive**: Persistent storage of transcripts and metadata in MongoDB.
+### 1. FFmpeg Setup (Required for Whisper)
+- **Windows**: `winget install --id Gyan.FFmpeg`
+- **macOS**: `brew install ffmpeg`
+- **Linux**: `sudo apt install ffmpeg`
 
----
-
-## 🔧 Environment Configuration (.env)
-
-```env
-GROQ_API_KEY=gsk_...
-MONGODB_URI=mongodb+srv://...
-BOT_NAME=MeetAI
-WHISPER_MODEL=base
+### 2. Python Dependencies
+```bash
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+playwright install chromium
 ```
 
 ---
 
-## 🛠️ Usage
+## 🎯 Features & Usage
 
-1. **New Meeting**: Upload audio files for offline processing.
-2. **Live Session**: Enter a meeting URL to start the automated bot.
-3. **Archive**: Browse past meetings and ask questions via the RAG interface.
-4. **Action Tracker**: Monitor and update status of extracted tasks.
+1. **Live Meeting Bot**: Enters a URL (Zoom/Meet), joins the session, and captures loopback audio.
+2. **Analytical Summary**: Generates high-level summaries and detailed action items using Llama 3.3.
+3. **Calendar Reminders**: Create Google Calendar invites directly from extracted action items.
+4. **Action Tracker**: Grouped, paginated view of all tasks with automated status lifecycles.
+5. **Global Intelligence**: Ask questions about your entire meeting history using RAG.
