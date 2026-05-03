@@ -67,6 +67,11 @@ Return ONLY the cleaned transcript. Do not add any introductory or concluding te
             dict: Summary with key points, decisions, and next steps
         """
         try:
+            # Check for large transcript (approx 30k chars is safe for free tier TPM)
+            if len(transcript) > 30000:
+                print(f"[INFO] Transcript is large ({len(transcript)} chars). Using chunked summarization...")
+                return self._generate_chunked_summary(transcript, meeting_context)
+
             # Build context
             context = ""
             if meeting_context:
@@ -114,6 +119,94 @@ Keep it clear, concise, and actionable."""
             print(f"[ERROR] Summary generation error: {e}")
             raise
     
+    def _chunk_transcript(self, transcript: str, chunk_size: int = 15000) -> list:
+        """Split transcript into chunks by sentences/paragraphs where possible"""
+        chunks = []
+        current_chunk = ""
+        
+        # Split by newlines first to keep speaker turns together
+        lines = transcript.split('\n')
+        for line in lines:
+            if len(current_chunk) + len(line) < chunk_size:
+                current_chunk += line + '\n'
+            else:
+                chunks.append(current_chunk.strip())
+                current_chunk = line + '\n'
+        
+        if current_chunk:
+            chunks.append(current_chunk.strip())
+        
+        return chunks
+
+    def _generate_chunked_summary(self, transcript, meeting_context):
+        """Map-Reduce summarization strategy for large transcripts"""
+        chunks = self._chunk_transcript(transcript)
+        print(f"[INFO] Processing {len(chunks)} transcript chunks...")
+        
+        chunk_summaries = []
+        for i, chunk in enumerate(chunks):
+            print(f"  - Summarizing chunk {i+1}/{len(chunks)}...")
+            # Use a slightly simplified prompt for intermediate chunks
+            prompt = f"""Summarize this portion of a meeting transcript. 
+Focus on capturing the core discussion points and any decisions made.
+
+TRANSCRIPT PORTION:
+{chunk}
+
+Provide a concise summary in bullet points."""
+            
+            import time
+            time.sleep(1) # Safety delay to avoid TPM burst
+            
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You are a concise meeting analyst."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=1000
+            )
+            chunk_summaries.append(response.choices[0].message.content)
+
+        # Final Synthesis
+        print("[INFO] Synthesizing final summary...")
+        context = ""
+        if meeting_context:
+            context = f"Meeting: {meeting_context.get('title', 'Unknown')}\n"
+            
+        synthesis_prompt = f"""{context}The following are summaries of different parts of a long meeting. 
+Please combine them into one comprehensive, well-structured, and coherent final intelligence report.
+
+SUMMARIES FROM DIFFERENT PARTS:
+{"---".join(chunk_summaries)}
+
+Provide a structured final summary with:
+1. **Overview**: Brief high-level overview
+2. **Key Discussion Points**: Categorized by topic
+3. **Decisions Made**: Finalized decisions
+4. **Next Steps**: Future actions mentioned throughout
+5. **Important Mentions**: Key quotes or details
+
+Return a professional and polished final summary."""
+
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": "You are a master intelligence analyst. Synthesize multiple summaries into one cohesive report."},
+                {"role": "user", "content": synthesis_prompt}
+            ],
+            temperature=0.5,
+            max_tokens=settings.GROQ_MAX_TOKENS
+        )
+        
+        return {
+            'summary': response.choices[0].message.content,
+            'model': self.model,
+            'generated_at': datetime.now().isoformat(),
+            'is_chunked': True
+        }
+
     def answer_question(self, transcript, question):
         """
         Answer a question - either about meetings (if transcript provided) or general knowledge
