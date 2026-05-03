@@ -95,6 +95,13 @@ class AudioBuffer:
             new_data = frames.flatten().astype(np.float32)
             self.buffer = np.concatenate((self.buffer, new_data))
             self.total_frames += len(frames)
+
+    def mix_frames(self, frames: np.ndarray):
+        """Add frames to buffer (concatenation ensures buffer grows even if other stream is silent)"""
+        with self.lock:
+            new_data = frames.flatten().astype(np.float32)
+            self.buffer = np.concatenate((self.buffer, new_data))
+            self.total_frames += len(frames)
     
     def get_chunk(self) -> Optional[np.ndarray]:
         """
@@ -186,12 +193,12 @@ class MeetingBot:
         self.browser: Optional[Browser] = None
         self.page: Optional[Page] = None
         self.audio_buffer: Optional[AudioBuffer] = None
-        self.audio_stream = None
-        
         self.is_recording = False
         self.transcription_results: List[dict] = []
         self.participants: List[str] = []
         self.meeting_active = False
+        self.audio_stream = None
+        self.mic_stream = None
         import threading
         # Threading and Asyncio
         self.loop: Optional[asyncio.AbstractEventLoop] = None
@@ -491,6 +498,13 @@ class MeetingBot:
             if self.is_recording:
                 self.audio_buffer.add_frames(indata.copy())
         
+        def mic_callback(indata, frames, time_info, status):
+            if status:
+                pass
+            if self.is_recording:
+                # We use a separate mixing method to overlay mic on top of loopback
+                self.audio_buffer.mix_frames(indata.copy())
+        
         # Strategy 1: Attempt WASAPI Loopback (Most reliable for Windows)
         print("  🔍 Strategy 1: Attempting WASAPI Loopback (Universal Capture)...")
         self.cable_device_idx = None
@@ -540,9 +554,58 @@ class MeetingBot:
                 dtype=np.float32,
                 device=self.cable_device_idx
             )
-            self.audio_stream.start()
+            # Strategy 2: Start Microphone Stream (For user's own voice)
+            print("  🎤 Strategy 2: Initializing Microphone Capture (for your voice)...")
+            try:
+                # Find a REAL microphone (not the virtual cable)
+                mic_idx = None
+                print("  [DEBUG] Scanning for physical microphones...")
+                for i, d in enumerate(devices):
+                    if d['max_input_channels'] > 0:
+                        name = d['name'].lower()
+                        print(f"    - Device [{i}]: {d['name']} (Channels: {d['max_input_channels']})")
+                        
+                        # EXCLUSION: If it's the cable we're already using, skip it
+                        if i == self.cable_device_idx:
+                            continue
+                            
+                        # INCLUSION: Prioritize things that sound like real hardware
+                        if any(k in name for k in ['microphone', 'internal', 'realtek', 'array', 'high definition audio']):
+                            # Double check it's not a virtual cable
+                            if not any(k in name for k in ['cable', 'loopback', 'stereo mix']):
+                                mic_idx = i
+                                print(f"    ⭐ Found likely hardware mic: {d['name']}")
+                                break
+                
+                # Fallback: if we didn't find a "Microphone" string, take the first non-cable input
+                if mic_idx is None:
+                    print("    [INFO] No explicit 'Microphone' device found, picking first non-cable input...")
+                    for i, d in enumerate(devices):
+                        if d['max_input_channels'] > 0 and i != self.cable_device_idx:
+                            mic_idx = i
+                            break
+                
+                if mic_idx is None:
+                    # Final desperate fallback
+                    mic_idx = sd.default.device[0]
+
+                if mic_idx is not None and mic_idx != self.cable_device_idx:
+                    self.mic_stream = sd.InputStream(
+                        samplerate=self.config.sample_rate,
+                        channels=self.config.channels,
+                        callback=mic_callback,
+                        device=mic_idx,
+                        dtype=np.float32
+                    )
+                    self.mic_stream.start()
+                    print(f"  [SUCCESS] Microphone capture STARTED: {sd.query_devices(mic_idx)['name']}")
+                else:
+                    print("  [WARNING] No suitable independent microphone found. Your voice might not be captured unless you use earphones.")
+            except Exception as mic_e:
+                print(f"  [WARNING] Could not start microphone capture: {mic_e}")
+
             self.is_recording = True
-            print(f"  [SUCCESS] Audio stream STARTED successfully on: {devices[self.audio_stream.device]['name']}")
+            print(f"  [SUCCESS] Dual-Audio capture system ACTIVE")
             return
             
         except Exception as e:
@@ -617,11 +680,25 @@ class MeetingBot:
         
         self.emit_status("TRANSCRIBING", "Recording and transcribing audio in real-time...")
         
+        # DEBUG: Track if we are receiving ANY data
+        last_frames_check = 0
+        
         while (self.is_recording or self.meeting_active):
-            # Check flags AND if the main thread is still alive
-            if self.stop_event.is_set() or self.hard_stop_flag.is_set() or not threading.main_thread().is_alive():
-                print("  [DEBUG] Termination signal or main thread death detected. Exiting loop.")
+            # Check flags ONLY (Removed threading.main_thread check as it's unreliable in Streamlit)
+            if self.stop_event.is_set() or self.hard_stop_flag.is_set():
+                print("  [DEBUG] Termination signal detected. Exiting loop.")
                 break
+
+            # Heartbeat: Print every 50,000 frames (~3 seconds)
+            current_frames = self.audio_buffer.total_frames
+            if current_frames > last_frames_check + 50000:
+                # Calculate current volume for debugging
+                recent_vol = 0
+                if len(self.audio_buffer.buffer) > 1000:
+                    recent_vol = np.sqrt(np.mean(self.audio_buffer.buffer[-1000:]**2))
+                
+                print(f"  [AUDIO] Captured {current_frames} total frames... (Buffer: {len(self.audio_buffer.buffer)}) | Vol: {recent_vol:.4f}")
+                last_frames_check = current_frames
 
             # Get complete audio chunk from buffer
             audio_chunk = self.audio_buffer.get_chunk()
@@ -631,10 +708,9 @@ class MeetingBot:
                 print(f"[INFO] Transcribing chunk #{chunk_count}...")
                 
                 try:
-                    # Check if chunk has any actual audio (not just silence)
-                    # This prevents Whisper from hallucinating during silences
+                    # Lowered threshold to be much more sensitive (0.001)
                     rms = np.sqrt(np.mean(audio_chunk**2))
-                    if rms < 0.005: # Silence threshold
+                    if rms < 0.001: # Silence threshold
                         # print(f"  [WAIT] Skipping silent chunk (RMS: {rms:.5f})")
                         continue
 
@@ -842,6 +918,14 @@ class MeetingBot:
             except Exception as e:
                 print(f"  [WARNING] Error stopping audio stream: {e}")
         
+        # Stop mic stream
+        if self.mic_stream:
+            try:
+                self.mic_stream.stop()
+                self.mic_stream.close()
+            except Exception as e:
+                print(f"  [WARNING] Error stopping mic stream: {e}")
+        
         # PURGE THE BUFFER - This is the key to stopping the "backlog" transcription
         if self.audio_buffer:
             print("  [DEBUG] Purging audio buffer to prevent backlog transcription...")
@@ -898,7 +982,7 @@ class MeetingBot:
         action_items = []
         
         # 1. POST_PROCESSING (Clean proper nouns via LLM)
-        if self.summary_agent and self.config.prompt_context and not self.hard_stop_flag.is_set():
+        if self.summary_agent and self.config.prompt_context:
             self.emit_status("POST_PROCESSING", "Correcting proper nouns and phonetics via LLM...")
             try:
                 cleaned_transcript = self.summary_agent.clean_transcript(full_transcript, self.config.prompt_context)
@@ -907,7 +991,7 @@ class MeetingBot:
                 cleaned_transcript = full_transcript
         
         # 2. GENERATING_SUMMARY (Summarize using Cleaned Transcript)
-        if self.summary_agent and not self.hard_stop_flag.is_set():
+        if self.summary_agent:
             self.emit_status("GENERATING_SUMMARY", "Analyzing transcript and formatting summary...")
             try:
                 participants_list = [p.strip() for p in self.config.prompt_context.split(',')] if self.config.prompt_context else []
@@ -923,7 +1007,7 @@ class MeetingBot:
                 summary = "Summary generation skipped or failed."
 
         # 3. EXTRACTING_ACTIONS (Extract tasks from Cleaned Transcript)
-        if self.action_agent and not self.hard_stop_flag.is_set():
+        if self.action_agent:
             self.emit_status("EXTRACTING_ACTIONS", "Scanning context for actionable tasks and deadlines...")
             try:
                 action_items = self.action_agent.extract_action_items(cleaned_transcript)
