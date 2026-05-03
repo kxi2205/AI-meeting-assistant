@@ -26,7 +26,7 @@ Advanced Multi-Agent RAG System for Automated Meeting Intelligence.
 
 The AI Meeting Assistant is built on a modular, multi-agent architecture:
 
-- **Speech-to-Text**: Local OpenAI Whisper (Base) for high-accuracy transcriptions.
+- **Speech-to-Text**: Groq Cloud Whisper (v3) for high-speed, accurate transcriptions with parallel chunking for large files.
 - **LLM Engine**: Groq Cloud (Llama 3.3 70B) for near-instant summary and action item extraction.
 - **Vector Store**: ChromaDB with `all-MiniLM-L6-v2` embeddings for semantic RAG search.
 - **Metadata Storage**: MongoDB Atlas for persistent meeting archives and task tracking.
@@ -87,6 +87,9 @@ ai-meeting-assistant/
 - **Windows**: `winget install --id Gyan.FFmpeg`
 - **macOS**: `brew install ffmpeg`
 - **Linux**: `sudo apt install ffmpeg`
+
+**Configuration**: If FFmpeg is not in your system PATH after installation, locate the `ffmpeg.exe` binary and add its path to your `.env` file:
+`FFMPEG_BINARY_PATH=C:\path\to\ffmpeg.exe`
 
 ### 2. Python Dependencies
 ```bash
