@@ -33,6 +33,11 @@ class ActionItemAgent:
             list: List of action items with task, owner, deadline, priority
         """
         try:
+            # Check for large transcript
+            if len(transcript) > 30000:
+                print(f"[INFO] Transcript is large ({len(transcript)} chars). Using chunked action item extraction...")
+                return self._extract_chunked_action_items(transcript)
+
             prompt = f"""Analyze this meeting transcript and extract ALL action items, tasks, and commitments.
 
 TRANSCRIPT:
@@ -93,6 +98,73 @@ If no action items are found, return an empty array: []"""
             print(f"[ERROR] Action item extraction error: {e}")
             raise
     
+    def _extract_chunked_action_items(self, transcript):
+        """Extract action items from chunks and merge them"""
+        # Simple character-based chunking
+        chunk_size = 15000
+        chunks = [transcript[i:i+chunk_size] for i in range(0, len(transcript), chunk_size)]
+        
+        all_action_items = []
+        for i, chunk in enumerate(chunks):
+            print(f"  - Extracting action items from chunk {i+1}/{len(chunks)}...")
+            import time
+            time.sleep(1) # Safety delay
+            chunk_items = self._extract_single_chunk(chunk)
+            all_action_items.extend(chunk_items)
+            
+        print(f"[SUCCESS] Total action items extracted from {len(chunks)} chunks: {len(all_action_items)}")
+        return all_action_items
+
+    def _extract_single_chunk(self, chunk):
+        """Helper to extract items from a single chunk using the base prompt logic"""
+        try:
+            prompt = f"""Analyze this portion of a meeting transcript and extract ANY action items, tasks, or commitments.
+
+TRANSCRIPT PORTION:
+{chunk}
+
+For each action item, provide:
+- task: Clear description of what needs to be done
+- assignee_name: Person responsible (use "Unassigned" if not mentioned)
+- deadline: When it's due (use "Not specified" if not mentioned)
+- confidence: high, medium, or low
+- evidence: A short quote from the transcript
+
+Return ONLY a valid JSON array of action items in this exact format:
+[
+  {{
+    "task": "Description",
+    "assignee_name": "Name",
+    "deadline": "Time",
+    "confidence": "high/medium/low",
+    "evidence": "Quote"
+  }}
+]
+
+If none found, return []."""
+            
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You are a task extraction specialist. Return only JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1,
+                max_tokens=1500
+            )
+            
+            result_text = response.choices[0].message.content.strip()
+            json_match = re.search(r'\[.*\]', result_text, re.DOTALL)
+            if json_match:
+                items = json.loads(json_match.group(0))
+                for item in items:
+                    item['status'] = 'pending'
+                return items
+            return []
+        except Exception as e:
+            print(f"  [WARNING] Failed to extract from chunk: {e}")
+            return []
+
     def categorize_action_items(self, action_items):
         """
         Categorize action items by priority and owner

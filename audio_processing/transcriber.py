@@ -2,9 +2,15 @@
 Audio transcription using Groq Cloud Whisper API
 """
 import os
+import asyncio
+import subprocess
+import math
+import tempfile
+import shutil
 from pathlib import Path
-from groq import Groq
+from groq import Groq, AsyncGroq
 import config.settings as settings
+from datetime import datetime
 
 class AudioTranscriber:
     """Handles audio transcription using Groq Whisper API"""
@@ -28,9 +34,13 @@ class AudioTranscriber:
             api_key=settings.GROQ_API_KEY,
             max_retries=3
         )
+        self.async_client = AsyncGroq(
+            api_key=settings.GROQ_API_KEY,
+            max_retries=3
+        )
         
-        self.ffmpeg_available = True  # We don't need local FFmpeg anymore for native Python fallback to matter
-        print("[SUCCESS] Groq Audio API initialized successfully")
+        self.ffmpeg_available = True
+        print("[SUCCESS] Groq Audio API initialized successfully (Parallel Chunking Enabled)")
 
     def transcribe_audio(self, audio_path, language=None, prompt=""):
         """
@@ -45,6 +55,12 @@ class AudioTranscriber:
             dict: Transcription results with text, segments, and metadata
         """
         try:
+            # Check file size (Groq limit is 25MB)
+            file_size = os.path.getsize(str(audio_path))
+            if file_size > 24 * 1024 * 1024:  # 24MB threshold
+                print(f"[INFO] Large file detected ({file_size / 1024 / 1024:.2f} MB). Starting parallel chunked transcription...")
+                return asyncio.run(self._split_and_transcribe(audio_path, language, prompt))
+
             print(f"Transcribing via Groq Cloud: {audio_path}")
             
             # Setup optional kwargs based on API spec
@@ -57,7 +73,7 @@ class AudioTranscriber:
             if prompt and prompt.strip():
                 kwargs["prompt"] = prompt.strip()
             
-            # Use Groq API
+            # Use Groq API (Synchronous for small files)
             with open(str(audio_path), "rb") as file:
                 kwargs["file"] = (os.path.basename(audio_path), file.read())
                 response = self.client.audio.transcriptions.create(**kwargs)
@@ -79,6 +95,82 @@ class AudioTranscriber:
         except Exception as e:
             print(f"[ERROR] Groq Transcription error: {e}")
             raise
+
+    async def _split_and_transcribe(self, audio_path, language=None, prompt=""):
+        """Split large audio into chunks and transcribe in parallel"""
+        temp_dir = Path(tempfile.mkdtemp(prefix="meeting_chunks_"))
+        try:
+            # 1. Split audio using FFmpeg (fast stream copy)
+            # We use 10-minute segments as a safe default that usually stays under 25MB
+            print(f"[INFO] Splitting audio into segments...")
+            segment_pattern = temp_dir / "chunk_%03d.mp3"
+            
+            ffmpeg_exe = settings.FFMPEG_BINARY_PATH or 'ffmpeg'
+            split_cmd = [
+                ffmpeg_exe, '-i', str(audio_path),
+                '-f', 'segment',
+                '-segment_time', '600', # 10 minutes
+                '-c', 'copy',
+                str(segment_pattern)
+            ]
+            subprocess.run(split_cmd, check=True, capture_output=True)
+            
+            chunks = sorted(list(temp_dir.glob("chunk_*.mp3")))
+            print(f"[INFO] Created {len(chunks)} chunks for parallel processing.")
+
+            # 2. Transcribe chunks in parallel
+            tasks = []
+            for i, chunk_path in enumerate(chunks):
+                tasks.append(self._transcribe_chunk_async(chunk_path, language, prompt, i))
+            
+            results = await asyncio.gather(*tasks)
+            
+            # 3. Combine results in order
+            results.sort(key=lambda x: x['index'])
+            combined_text = " ".join([r['text'] for r in results])
+            total_duration = sum([r['duration'] for r in results])
+            
+            final_transcription = {
+                'text': combined_text.strip(),
+                'language': results[0]['language'] if results else 'unknown',
+                'segments': [], # Could flatten segments if needed, but text is priority
+                'duration': total_duration
+            }
+            
+            # Save final transcript
+            self._save_transcript(audio_path, final_transcription['text'])
+            print(f"[SUCCESS] Parallel transcription complete. Total characters: {len(combined_text)}")
+            return final_transcription
+
+        finally:
+            # Cleanup temp files
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    async def _transcribe_chunk_async(self, chunk_path, language, prompt, index):
+        """Internal helper for async chunk transcription"""
+        try:
+            kwargs = {
+                "model": self.model_name,
+                "response_format": "verbose_json",
+            }
+            if language and language != "auto":
+                kwargs["language"] = language
+            if prompt and prompt.strip():
+                kwargs["prompt"] = prompt.strip()
+                
+            with open(str(chunk_path), "rb") as file:
+                kwargs["file"] = (os.path.basename(chunk_path), file.read())
+                response = await self.async_client.audio.transcriptions.create(**kwargs)
+                
+            return {
+                'index': index,
+                'text': response.text.strip(),
+                'language': getattr(response, 'language', 'unknown'),
+                'duration': getattr(response, 'duration', 0)
+            }
+        except Exception as e:
+            print(f"[ERROR] Chunk #{index} transcription failed: {e}")
+            return {'index': index, 'text': "", 'language': 'unknown', 'duration': 0}
     
     def _save_transcript(self, audio_path, text):
         """Save transcript to text file"""
