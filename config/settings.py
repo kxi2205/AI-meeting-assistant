@@ -35,8 +35,8 @@ GROQ_TEMPERATURE = float(os.getenv("GROQ_TEMPERATURE", "0.7"))
 GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS", "2000"))
 
 # RAG Configuration
-CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
-CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "250"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "50"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 
 # Email Configuration (SMTP)

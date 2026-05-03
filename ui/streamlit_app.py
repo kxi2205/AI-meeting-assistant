@@ -1081,7 +1081,9 @@ def process_meeting(audio_file, title, participants_str):
                     "title": title,
                     "date": datetime.now().strftime("%Y-%m-%d"),
                     "participants": participants_str
-                }
+                },
+                summary=summary,
+                action_items=action_items
             )
         
         st.success("🎉 Meeting processed and saved successfully!")
@@ -1572,7 +1574,7 @@ def global_intelligence_page():
                 
                 # Show source references
                 with st.expander("Intelligence Sources"):
-                    sources = st.session_state.context_agent.search_meetings(query, n_results=3)
+                    sources = st.session_state.context_agent.search_meetings(query, n_results=5)
                     if sources:
                         for idx, source in enumerate(sources, 1):
                             st.markdown(f"**Source {idx}:** {source['metadata'].get('title', 'Unknown Meeting')} ({source['metadata'].get('date', 'N/A')})")
