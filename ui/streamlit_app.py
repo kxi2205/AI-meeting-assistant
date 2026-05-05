@@ -477,6 +477,7 @@ def join_live_meeting(url, platform, duration, title, participants_str, reconnec
             config = MeetingConfig(
                 meeting_url=url,
                 platform=platform,
+                title=title,
                 duration_minutes=duration,
                 audio_device=device_index,
                 headless=True,
@@ -521,6 +522,7 @@ def join_live_meeting(url, platform, duration, title, participants_str, reconnec
                     )
                     bot_manager.bot_instance = bot  # Store reference
                     result = loop.run_until_complete(bot.join_meeting())
+                    result["title"]=title
                     bot_manager.result_queue.put(('success', result))
                 except Exception as e:
                     bot_manager.result_queue.put(('error', e))

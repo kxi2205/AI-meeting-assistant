@@ -49,6 +49,7 @@ class MeetingConfig:
     """Configuration for meeting bot"""
     meeting_url: str
     platform: str  # "zoom" or "google_meet"
+    title: str = "Live Meeting"  # Optional title for UI display
     duration_minutes: int = 60  # Maximum meeting duration
     sample_rate: int = 16000  # Audio sample rate (Whisper expects 16kHz)
     channels: int = 1  # Mono audio
@@ -996,7 +997,7 @@ class MeetingBot:
             try:
                 participants_list = [p.strip() for p in self.config.prompt_context.split(',')] if self.config.prompt_context else []
                 ctx = {
-                    'title': "Live Meeting",
+                    'title': self.config.title,
                     'date': datetime.now().strftime("%Y-%m-%d"),
                     'participants': participants_list
                 }
@@ -1030,7 +1031,7 @@ class MeetingBot:
                 
             meeting_data = {
                 "meeting_id": meeting_id,
-                "title": "Live Meeting",
+                "title": self.config.title,
                 "date": datetime.now().isoformat(),
                 "participants": participants_list,
                 "transcript": cleaned_transcript,
@@ -1058,7 +1059,7 @@ class MeetingBot:
                     meeting_id=meeting_id,
                     transcript=cleaned_transcript,
                     metadata={
-                        "title": "Live Meeting",
+                        "title": self.config.title,
                         "date": datetime.now().strftime("%Y-%m-%d"),
                         "participants": ", ".join(participants_list)
                     }
@@ -1069,8 +1070,7 @@ class MeetingBot:
         return {
             'meeting_url': self.config.meeting_url,
             'platform': self.config.platform,
-            'transcript_path': str(transcript_path),
-            'chunks': self.transcription_results,
+            'title': self.config.title,
             'full_transcript': full_transcript,
             'cleaned_transcript': cleaned_transcript,
             'summary': summary,
