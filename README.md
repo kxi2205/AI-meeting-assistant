@@ -26,8 +26,8 @@ Advanced Multi-Agent RAG System for Automated Meeting Intelligence.
 
 The AI Meeting Assistant is built on a modular, multi-agent architecture:
 
-- **Speech-to-Text**: Groq Cloud Whisper (v3) for high-speed, accurate transcriptions with parallel chunking for large files.
-- **LLM Engine**: Groq Cloud (Llama 3.3 70B) for near-instant summary and action item extraction.
+- **Speech-to-Text**: **Whisper-large-v3** for high-speed, accurate transcriptions with parallel chunking for large files.
+- **LLM Engine**: **Llama-3.1-70b-versatile** for near-instant summary and action item extraction.
 - **Vector Store**: ChromaDB with `all-MiniLM-L6-v2` embeddings for semantic RAG search.
 - **Metadata Storage**: MongoDB Atlas for persistent meeting archives and task tracking.
 - **Automation**: Playwright-based bot for joining and recording browser-based meetings.
@@ -104,7 +104,7 @@ playwright install chromium
 ## 🎯 Features & Usage
 
 1. **Live Meeting Bot**: Enters a URL (Zoom/Meet), joins the session, and captures loopback audio.
-2. **Analytical Summary**: Generates high-level summaries and detailed action items using Llama 3.3.
+2. **Analytical Summary**: Generates high-level summaries and detailed action items using **Llama 3.1**.
 3. **Calendar Reminders**: Create Google Calendar invites directly from extracted action items.
 4. **Action Tracker**: Grouped, paginated view of all tasks with automated status lifecycles.
 5. **Global Intelligence**: Ask questions about your entire meeting history using RAG.
