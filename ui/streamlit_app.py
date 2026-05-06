@@ -42,6 +42,17 @@ st.set_page_config(
     layout="wide"
 )
 
+st.markdown(
+    """
+    <style>
+    [data-testid="stHeader"] {display: none;}
+    [data-testid="stToolbar"] {display: none;}
+    [data-testid="stDeployButton"] {display: none;}
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
 # Initialize session state
 if 'transcriber' not in st.session_state:
     st.session_state.transcriber = None
@@ -949,33 +960,19 @@ def new_meeting_page():
     """Page for uploading and processing new meetings"""
     st.header("Process Recording")
     
-    col1, col2 = st.columns([2, 1])
+    # Meeting details
+    meeting_title = st.text_input("Session Title", placeholder="e.g., Strategic Planning")
+    participants = st.text_input(
+        "Participants (comma separated)",
+        placeholder="Jane Doe, John Smith"
+    )
     
-    with col1:
-        # Meeting details
-        meeting_title = st.text_input("Session Title", placeholder="e.g., Strategic Planning")
-        participants = st.text_input("Participants (comma separated)", 
-                                    placeholder="Jane Doe, John Smith")
-        
-        # File upload
-        audio_file = st.file_uploader(
-            "Upload Audio File",
-            type=['mp3', 'wav', 'm4a', 'ogg', 'flac', 'mp4'],
-            help=f"Max size: {settings.MAX_AUDIO_SIZE_MB}MB"
-        )
-    
-    with col2:
-        st.info("""
-        **Supported formats:**
-        - MP3, WAV, M4A
-        - OGG, FLAC
-        - MP4 (audio)
-        
-        **Tips:**
-        - Clear audio = better results
-        - 5-60 minutes optimal
-        - Avoid background noise
-        """)
+    # File upload
+    audio_file = st.file_uploader(
+        "Upload Audio File",
+        type=['mp3', 'wav', 'm4a', 'ogg', 'flac', 'mp4'],
+        help=f"Max size: {settings.MAX_AUDIO_SIZE_MB}MB"
+    )
     
     # Process button
     if audio_file and meeting_title:
@@ -1731,17 +1728,32 @@ def action_items_page():
                     with c4:
                         # Derive Status Label
                         if status == 'completed':
-                            st.success("Completed")
+                            st.markdown(
+                                "<span style='color: #2e7d32; font-weight: 600;'>Completed</span>",
+                                unsafe_allow_html=True
+                            )
                         elif rem_status == 'created':
-                            st.info("Invite Sent")
+                            st.markdown(
+                                "<span style='color: #1e88e5; font-weight: 600;'>Invite Sent</span>",
+                                unsafe_allow_html=True
+                            )
                         elif parsed_deadline:
                             now = datetime.now()
                             if parsed_deadline < now:
-                                st.error("Overdue")
+                                st.markdown(
+                                    "<span style='color: #c62828; font-weight: 600;'>Overdue</span>",
+                                    unsafe_allow_html=True
+                                )
                             elif parsed_deadline.date() == now.date():
-                                st.warning("Due Today")
+                                st.markdown(
+                                    "<span style='color: #ef6c00; font-weight: 600;'>Due Today</span>",
+                                    unsafe_allow_html=True
+                                )
                             else:
-                                st.success("Upcoming")
+                                st.markdown(
+                                    "<span style='color: #2e7d32; font-weight: 600;'>Upcoming</span>",
+                                    unsafe_allow_html=True
+                                )
                         else:
                             st.caption("Pending")
                     
