@@ -39,18 +39,8 @@ except:
 st.set_page_config(
     page_title="AI Meeting Assistant",
     page_icon="AI",
-    layout="wide"
-)
-
-st.markdown(
-    """
-    <style>
-    [data-testid="stHeader"] {display: none;}
-    [data-testid="stToolbar"] {display: none;}
-    [data-testid="stDeployButton"] {display: none;}
-    </style>
-    """,
-    unsafe_allow_html=True
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 # Initialize session state
