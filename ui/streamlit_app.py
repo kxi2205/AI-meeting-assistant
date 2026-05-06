@@ -1,5 +1,5 @@
 """
-Streamlit UI for AI Meeting Assistant
+AI Meeting Assistant UI
 """
 import streamlit as st
 import sys
@@ -38,7 +38,7 @@ except:
 # Page configuration
 st.set_page_config(
     page_title="AI Meeting Assistant",
-    page_icon="🎙️",
+    page_icon="AI",
     layout="wide"
 )
 
@@ -72,18 +72,12 @@ def load_models():
     return transcriber, summary_agent, action_agent, vector_store, context_agent, email_sender, recipient_resolver
 
 def main():
-    st.title("Meeting Intelligence Assistant")
+    st.title("AI Meeting Assistant")
     st.markdown("Automated transcription, summary generation, and cross-meeting intelligence.")
     
     # Sidebar
     with st.sidebar:
         st.header("Settings")
-        
-        # Model info
-        with st.expander("Model Configuration"):
-            st.write(f"**Whisper Model:** {settings.WHISPER_MODEL}")
-            st.write(f"**LLM:** {settings.GROQ_MODEL}")
-            st.write(f"**Device:** {settings.WHISPER_DEVICE}")
         
         # Database stats
         with st.expander("Analytics"):
@@ -110,9 +104,9 @@ def main():
                 task = deadline_warning['task']
                 assignee = deadline_warning['assignee']
                 
-                warning_text = f"**⏰ {label}**\n\n"
-                warning_text += f"📋 {task}\n\n"
-                warning_text += f"👤 {assignee}"
+                warning_text = f"**{label}**\n\n"
+                warning_text += f"Task: {task}\n\n"
+                warning_text += f"Assignee: {assignee}"
                 
                 if urgency == 'overdue':
                     st.error(warning_text)
@@ -124,23 +118,20 @@ def main():
             # Silently skip — deadline warning is non-critical
             print(f"[WARNING] Deadline warning card error: {e}")
         
-        # Integrations
-        with st.expander("⚙️ Integrations", expanded=False):
+        # Profile
+        with st.expander("Profile", expanded=False):
             accounts = db.get_connected_accounts()
             account_emails = [acc['email'] for acc in accounts]
             
             if accounts:
                 st.write("**Connected Google Accounts:**")
                 for email in account_emails:
-                    col1, col2 = st.columns([3, 1])
-                    with col1:
-                        st.caption(f"✅ {email}")
-                    with col2:
-                        if st.button("Disconnect", key=f"del_{email}", help="Remove this account"):
-                            if db.delete_connected_account(email):
-                                st.success("Disconnected")
-                                time.sleep(1)
-                                st.rerun()
+                    st.caption(f"Connected: {email}")
+                    if st.button("Disconnect", key=f"del_{email}", help="Remove this account"):
+                        if db.delete_connected_account(email):
+                            st.success("Disconnected")
+                            time.sleep(1)
+                            st.rerun()
                 
                 # Active Account Selection
                 selected_account = st.selectbox(
@@ -155,7 +146,7 @@ def main():
                 
             st.divider()
             
-            if st.button("➕ Connect Google Account", use_container_width=True):
+            if st.button("Connect Google Account", use_container_width=True):
                 with st.spinner("Waiting for authentication in browser..."):
                     connected_email = auth_manager.connect_new_account()
                     if connected_email:
@@ -209,7 +200,7 @@ def live_meeting_page():
     
     # 1. Check for persistent meeting report view
     if 'last_meeting_result' in st.session_state and st.session_state.last_meeting_result:
-        if st.button("⬅️ Start New Session", type="secondary"):
+        if st.button("Start New Session", type="secondary"):
             st.session_state.last_meeting_result = None
             st.rerun()
         display_meeting_report(st.session_state.last_meeting_result)
@@ -217,7 +208,7 @@ def live_meeting_page():
 
     # 2. Reconnect to active session if running
     if bot_manager.is_running():
-        st.info("🔄 Active session detected in background. Reconnecting UI...")
+        st.info("Active session detected in background. Reconnecting UI...")
         
         # Load history so the UI isn't blank
         with st.expander("Session History", expanded=False):
@@ -225,10 +216,10 @@ def live_meeting_page():
             for evt in history:
                 state = evt.get("state", "UNKNOWN")
                 detail = evt.get("detail", "")
-                st.write(f"⌛ **{state}**: {detail}")
+                st.write(f"**{state}**: {detail}")
         
         # Emergency reset if the regular terminate fails
-        if st.button("🚨 Emergency Reset (Use if Terminate fails)", type="secondary", use_container_width=True):
+        if st.button("Emergency Reset (Use if Terminate fails)", type="secondary", use_container_width=True):
             bot_manager.force_reset()
             st.rerun()
             
@@ -237,7 +228,7 @@ def live_meeting_page():
 
     # 3. Audio Device Detection and Manual Override
     if AUDIO_AVAILABLE:
-        with st.sidebar.expander("🎤 Audio Configuration", expanded=False):
+        with st.sidebar.expander("Audio Configuration", expanded=False):
             try:
                 devices = sd.query_devices()
                 input_devices = []
@@ -278,18 +269,18 @@ def live_meeting_page():
                     )
                     st.session_state['selected_device_index'] = int(selected_label.split(']')[0][1:])
                 else:
-                    st.warning("⚠️ No loopback devices detected. Please ensure Stereo Mix or VB-Cable is enabled in Windows Sound Settings.")
+                    st.warning("No loopback devices detected. Please ensure Stereo Mix or VB-Cable is enabled in Windows Sound Settings.")
                     if st.button("Refresh Audio Devices"):
                         st.rerun()
                 
             except Exception as e:
                 st.error(f"Audio Error: {e}")
     else:
-        st.sidebar.error("❌ sounddevice not installed. Audio capture unavailable.")
+        st.sidebar.error("sounddevice not installed. Audio capture unavailable.")
 
     device_ready = AUDIO_AVAILABLE and st.session_state.get('selected_device_index') is not None
     
-    tab_calendar, tab_manual = st.tabs(["📅 Calendar Mode", "✍️ Manual Mode"])
+    tab_calendar, tab_manual = st.tabs(["Calendar Mode", "Manual Mode"])
     
     with tab_calendar:
         _render_calendar_mode(device_ready)
@@ -326,7 +317,7 @@ def _render_calendar_mode(device_ready):
     active_account = st.session_state.get('active_google_account')
     
     if not active_account:
-        st.info("To use Calendar Mode, please connect and select a Google Account in the **Integrations** sidebar menu.")
+        st.info("To use Calendar Mode, please connect and select a Google Account in the **Profile** sidebar menu.")
         return
         
     st.markdown(f"**Fetching upcoming Google Meet events for:** `{active_account}`")
@@ -452,9 +443,9 @@ def _render_manual_mode(device_ready):
                 # Join meeting (no warnings needed - fully automated)
                 join_live_meeting(meeting_url, platform_code, duration, meeting_title, participants)
         else:
-            st.error("❌ Invalid meeting URL. Please check the format.")
+            st.error("Invalid meeting URL. Please check the format.")
     else:
-        st.info("👆 Enter a meeting URL above to start")
+        st.info("Enter a meeting URL above to start")
 
 def join_live_meeting(url, platform, duration, title, participants_str, reconnect=False, calendar_event_id=None, linked_account=None, invitees=None):
     """Join live meeting with bot and process results or reconnect to active one"""
@@ -494,7 +485,7 @@ def join_live_meeting(url, platform, duration, title, participants_str, reconnec
                 st.markdown("### Assistant Status")
                 st.write("Connecting to session...")
                 if device_index is not None:
-                    st.write(f"🎤 Audio device: Index {device_index}")
+                    st.write(f"Audio device: Index {device_index}")
             
             # Run meeting bot in a separate thread via bot_manager
             import asyncio
@@ -558,7 +549,7 @@ def join_live_meeting(url, platform, duration, title, participants_str, reconnec
                         raise result
                 except Exception as e:
                     if not isinstance(e, Exception) or str(e) == '':
-                        st.error("❌ Bot could not join the meeting within the timeout period.")
+                        st.error("Bot could not join the meeting within the timeout period.")
                     else:
                         raise
                 return
@@ -594,7 +585,7 @@ def join_live_meeting(url, platform, duration, title, participants_str, reconnec
             if st.button("Terminate Session", key="stable_terminate_btn", type="primary", use_container_width=True):
                 bot_manager.stop_bot()
                 timer_placeholder.markdown(f"### Finalizing...")
-                st.warning("🛑 Terminating assistant...")
+                st.warning("Terminating assistant...")
         
         while bot_manager.is_running() and (time.time() - join_time) < max_wait:
             elapsed_seconds = int(time.time() - join_time)
@@ -620,15 +611,15 @@ def join_live_meeting(url, platform, duration, title, participants_str, reconnec
                 
                 if state == "DONE":
                     status_box.update(label=detail, state="complete")
-                    status_box.write(f"✅ **{state}**: {detail}")
+                    status_box.write(f"**{state}**: {detail}")
                 elif state == "ERROR":
                     status_box.update(label=detail, state="error")
                 elif state == "FINALIZING":
-                    status_box.update(label=f"📝 {detail}", state="running")
-                    status_box.write(f"⌛ **{state}**: {detail}")
+                    status_box.update(label=f"{detail}", state="running")
+                    status_box.write(f"**{state}**: {detail}")
                 else:
                     status_box.update(label=f"[{state}] {detail}", state="running")
-                    status_box.write(f"🔄 **{state}**: {detail}")
+                    status_box.write(f"**{state}**: {detail}")
             
             # Check stop_event indirectly by checking thread or results
             if not bot_manager.is_running():
@@ -646,9 +637,9 @@ def join_live_meeting(url, platform, duration, title, participants_str, reconnec
             detail = evt.get("detail", "")
             if state == "DONE":
                 status_box.update(label=detail, state="complete")
-                status_box.write(f"✅ **{state}**: {detail}")
+                status_box.write(f"**{state}**: {detail}")
             else:
-                status_box.write(f"🔄 **{state}**: {detail}")
+                status_box.write(f"**{state}**: {detail}")
         
         # Clear dynamic elements
         stop_placeholder.empty()
@@ -671,13 +662,13 @@ def join_live_meeting(url, platform, duration, title, participants_str, reconnec
             if 'meeting_join_time' in st.session_state:
                 del st.session_state.meeting_join_time
         except Exception as e:
-            st.warning("⚠️ Background process detached from UI (This happens on manual terminate).")
+            st.warning("Background process detached from UI (This happens on manual terminate).")
             import os
             TRANSCRIPT_PATH = settings.TRANSCRIPTS_DIR / "live_meeting_latest.txt"
             if os.path.exists(TRANSCRIPT_PATH):
                 with open(TRANSCRIPT_PATH, "r", encoding="utf-8") as f:
                     transcript_text = f.read()
-                st.success("✅ Recovered latest transcript from disk!")
+                st.success("Recovered latest transcript from disk!")
                 st.markdown("---")
                 st.markdown("### Session Transcript")
                 with st.expander("View Transcript", expanded=True):
@@ -689,7 +680,7 @@ def join_live_meeting(url, platform, duration, title, participants_str, reconnec
         if status == 'error':
             raise result
         
-        st.success("✅ Meeting bot has left the meeting!")
+        st.success("Meeting bot has left the meeting!")
         
         # Store in session state for persistence and show report
         st.session_state.last_meeting_result = result
@@ -697,7 +688,7 @@ def join_live_meeting(url, platform, duration, title, participants_str, reconnec
         return
         
     except Exception as e:
-        st.error(f"❌ Error during meeting processing: {e}")
+        st.error(f"Error during meeting processing: {e}")
         with st.expander("View Error Details"):
             import traceback
             st.code(traceback.format_exc())
@@ -740,7 +731,7 @@ def display_meeting_report(result):
                 col2.caption(f"Deadline: {item.get('deadline', 'Not specified')}")
                 col3.caption(f"Confidence: {confidence}")
                 if item.get('evidence'):
-                    st.caption(f"🔍 *Evidence: \"{item.get('evidence')}\"*")
+                    st.caption(f"Evidence: \"{item.get('evidence')}\"")
                 st.divider()
 
     # 5. COMMUNICATION DISPATCH
@@ -869,7 +860,7 @@ def dispatch_summary(summary, action_items, title, initial_participants, transcr
             # 3. Fallback for no resolution
             if not email_data:
                 print("DEBUG Email Modal: Fallback to manual mode triggered")
-                st.info("No participant emails were automatically detected. Please enter them manually.", icon="ℹ️")
+                st.info("No participant emails were automatically detected. Please enter them manually.")
                 participants = []
                 if isinstance(initial_participants, list):
                     participants = initial_participants
@@ -882,7 +873,7 @@ def dispatch_summary(summary, action_items, title, initial_participants, transcr
             
             # Display unresolved participants separately
             if unresolved_info:
-                with st.expander("⚠️ Unresolved Participants (Emails missing)", expanded=False):
+                with st.expander("Unresolved Participants (Emails missing)", expanded=False):
                     st.write("The following participants were detected but no email address was found in integrated sources:")
                     for info in unresolved_info:
                         st.markdown(f"- {info}")
@@ -1054,7 +1045,7 @@ def process_meeting(audio_file, title, participants_str):
             st.info("No action items found in this meeting")
         
         # Step 4: Save to databases
-        with st.spinner("💾 Saving to database..."):
+        with st.spinner("Saving to database..."):
             # Save to MongoDB
             meeting_data = {
                 "meeting_id": meeting_id,
@@ -1088,7 +1079,7 @@ def process_meeting(audio_file, title, participants_str):
                 action_items=action_items
             )
         
-        st.success("🎉 Meeting processed and saved successfully!")
+        st.success("Meeting processed and saved successfully!")
         st.balloons()
         
         # Dispatch Center
@@ -1155,7 +1146,7 @@ def render_email_dispatch_modal(meeting):
 
     # Final fallback: manual entry rows for participants
     if not email_data:
-        st.info("No participant emails were stored for this meeting. You can enter them manually below.", icon="ℹ️")
+        st.info("No participant emails were stored for this meeting. You can enter them manually below.")
         participants = meeting.get('participants', [])
         if isinstance(participants, list):
             email_data = [{"Display Name": p, "Email": "", "Source": "Manual Entry"} for p in participants]
@@ -1169,7 +1160,7 @@ def render_email_dispatch_modal(meeting):
 
     # Display unresolved participants
     if unresolved_info:
-        with st.expander("⚠️ Unresolved Participants (Emails missing)", expanded=False):
+        with st.expander("Unresolved Participants (Emails missing)", expanded=False):
             for info in unresolved_info:
                 st.markdown(f"- {info}")
 
@@ -1208,7 +1199,7 @@ def render_email_dispatch_modal(meeting):
     with c3:
         inc_trn = st.checkbox("Include Transcript", value=False)
         
-    if st.button("🚀 Dispatch Emails", type="primary", use_container_width=True):
+    if st.button("Dispatch Emails", type="primary", use_container_width=True):
         recipient_emails = [row.get("Email", "").strip() for row in edited_recipients if row.get("Email", "").strip()]
         
         draft_actions = [{"task": r.get("Task", ""), "assignee_name": r.get("Assignee", ""), "deadline": r.get("Deadline", "")} for r in edited_actions if str(r.get("Task", "")).strip()]
@@ -1258,7 +1249,7 @@ def render_email_dispatch_modal(meeting):
             if results["failures"]:
                 st.error(f"Failed to deliver: {', '.join(results['failures'])}")
 
-@st.dialog("🗓️ Create Calendar Invite", width="large")
+@st.dialog("Create Calendar Invite", width="large")
 def render_reminder_creation_modal(meeting: dict, target_item_id: str = None):
     """
     Review modal for creating Google Calendar invites.
@@ -1270,7 +1261,7 @@ def render_reminder_creation_modal(meeting: dict, target_item_id: str = None):
     # Check if a Google account is connected
     accounts = db.get_connected_accounts()
     if not accounts:
-        st.error("No Google accounts connected. Go to **Settings > Integrations** to connect an account.")
+        st.error("No Google accounts connected. Go to **Settings > Profile** to connect an account.")
         return
     
     # Let user pick which account to use if multiple
@@ -1285,8 +1276,8 @@ def render_reminder_creation_modal(meeting: dict, target_item_id: str = None):
     # Check for write scope
     granted_scopes = selected_account.get('granted_scopes', [])
     if 'https://www.googleapis.com/auth/calendar.events' not in granted_scopes:
-        st.warning("⚠️ Your account was connected with read-only permissions.")
-        st.markdown("Please disconnect and reconnect in **Settings > Integrations** to enable reminder creation.")
+        st.warning("Your account was connected with read-only permissions.")
+        st.markdown("Please disconnect and reconnect in **Settings > Profile** to enable reminder creation.")
         return
 
     # Fetch action items
@@ -1356,7 +1347,7 @@ def render_reminder_creation_modal(meeting: dict, target_item_id: str = None):
                 rem_status = item.get('reminder_status', 'not_created')
                 
                 if rem_status == 'created':
-                    st.success("✅ Invite sent")
+                    st.success("Invite sent")
                     if st.button("Re-send Invite", key=f"resend_{idx}_{meeting['meeting_id']}", use_container_width=True):
                         st.session_state[f"force_retry_{idx}_{meeting['meeting_id']}"] = True
                 
@@ -1364,7 +1355,7 @@ def render_reminder_creation_modal(meeting: dict, target_item_id: str = None):
                     if not assignee_email:
                         st.warning("Email required to send invite")
                     
-                    if st.button("🚀 Create Calendar Invite", key=f"create_{idx}_{meeting['meeting_id']}", disabled=not assignee_email, use_container_width=True, type="primary"):
+                    if st.button("Create Calendar Invite", key=f"create_{idx}_{meeting['meeting_id']}", disabled=not assignee_email, use_container_width=True, type="primary"):
                         # Combine date and time (default to 5 PM)
                         target_dt = datetime.combine(deadline_val, datetime.min.time()).replace(hour=17)
                         
@@ -1442,7 +1433,7 @@ def past_meetings_page():
         # Display meetings
         for meeting in filtered_meetings:
             meeting_type = meeting.get('meeting_type', 'uploaded_recording')
-            type_symbol = "🔵" if meeting_type == 'live_meeting' else "📁"
+            type_label = "LIVE" if meeting_type == 'live_meeting' else "REC"
             title = meeting.get('title', 'Untitled')
             date_str = meeting.get('date', 'Unknown')[:10]
             
@@ -1453,7 +1444,7 @@ def past_meetings_page():
                 sum_preview = "No summary generated."
                 
             # Compose card title string
-            title_text = f"{type_symbol} {title}  |  {date_str}  |  {sum_preview}"
+            title_text = f"{type_label} {title}  |  {date_str}  |  {sum_preview}"
             
             with st.expander(title_text, expanded=False):
                 
@@ -1463,13 +1454,13 @@ def past_meetings_page():
                 
                 _, btn_col, rem_col, del_col = st.columns([3, 1, 1, 1])
                 with btn_col:
-                    if st.button("✉️ Send Summary", key=f"email_{meeting['meeting_id']}", use_container_width=True):
+                    if st.button("Send Summary", key=f"email_{meeting['meeting_id']}", use_container_width=True):
                         render_email_dispatch_modal(meeting)
                 with rem_col:
-                    if st.button("📅 Reminders", key=f"remind_{meeting['meeting_id']}", use_container_width=True):
+                    if st.button("Reminders", key=f"remind_{meeting['meeting_id']}", use_container_width=True):
                         render_reminder_creation_modal(meeting)
                 with del_col:
-                    if st.button("🗑️ Delete", key=f"del_{meeting['meeting_id']}", use_container_width=True):
+                    if st.button("Delete", key=f"del_{meeting['meeting_id']}", use_container_width=True):
                         with st.spinner("Removing..."):
                             db.delete_meeting(meeting['meeting_id'])
                             st.session_state.vector_store.delete_meeting(meeting['meeting_id'])
@@ -1607,10 +1598,10 @@ def action_items_page():
             assignee = deadline_warning['assignee']
             deadline_date = deadline_warning['deadline_date']
             
-            banner_text = f"**⏰ Closest Deadline: {label}**  \n"
-            banner_text += f"📋 **Task:** {task}  \n"
-            banner_text += f"👤 **Assignee:** {assignee}  \n"
-            banner_text += f"📅 **Deadline:** {deadline_date.strftime('%B %d, %Y')}"
+            banner_text = f"**Closest Deadline: {label}**  \n"
+            banner_text += f"**Task:** {task}  \n"
+            banner_text += f"**Assignee:** {assignee}  \n"
+            banner_text += f"**Deadline:** {deadline_date.strftime('%B %d, %Y')}"
             
             if urgency == 'overdue':
                 st.error(banner_text)
@@ -1718,41 +1709,41 @@ def action_items_page():
                     parsed_deadline = parse_deadline(deadline_str)
                     
                     with c1:
-                        priority_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}
-                        emoji = priority_emoji.get(item.get('priority', 'medium'), '⚪')
-                        st.markdown(f"**{emoji} {item['task']}**")
+                        priority_label = {"high": "HIGH", "medium": "MED", "low": "LOW"}
+                        label = priority_label.get(item.get('priority', 'medium'), 'MED')
+                        st.markdown(f"**{label} - {item['task']}**")
                         
                         # Re-add Calendar button per task
                         m_id_link = item.get('meeting_id')
                         if m_id_link and m_id_link != 'unlinked':
-                            if st.button("📅 Create Invite", key=f"rem_track_{item['_id']}", use_container_width=False, type="secondary", help="Create calendar invite for this item"):
+                            if st.button("Create Invite", key=f"rem_track_{item['_id']}", use_container_width=False, type="secondary", help="Create calendar invite for this item"):
                                 m_obj = db.get_meeting(m_id_link)
                                 if m_obj:
                                     render_reminder_creation_modal(m_obj, target_item_id=item['_id'])
                     
                     with c2:
                         assignee = item.get('owner') or item.get('assignee_name') or 'Unassigned'
-                        st.caption(f"👤 {assignee}")
+                        st.caption(f"Assignee: {assignee}")
                     
                     with c3:
-                        st.caption(f"📅 {item.get('deadline', 'N/A')}")
+                        st.caption(f"Deadline: {item.get('deadline', 'N/A')}")
                     
                     with c4:
                         # Derive Status Label
                         if status == 'completed':
-                            st.success("✅ Completed")
+                            st.success("Completed")
                         elif rem_status == 'created':
-                            st.info("🔵 Invite Sent")
+                            st.info("Invite Sent")
                         elif parsed_deadline:
                             now = datetime.now()
                             if parsed_deadline < now:
-                                st.error("🔴 Overdue")
+                                st.error("Overdue")
                             elif parsed_deadline.date() == now.date():
-                                st.warning("🟠 Due Today")
+                                st.warning("Due Today")
                             else:
-                                st.success("🟢 Upcoming")
+                                st.success("Upcoming")
                         else:
-                            st.markdown("`🟡 Pending` ")
+                            st.caption("Pending")
                     
                     with c5:
                         # Minimal completion toggle
