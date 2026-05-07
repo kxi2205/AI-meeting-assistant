@@ -42,8 +42,8 @@ def resolve_assignee_email(assignee_name: str, meeting: Dict) -> Tuple[Optional[
         return None, None
     
     norm_name = assignee_name.strip().lower()
-    invitees = meeting.get('invitees', [])
-    recipients = meeting.get('resolved_recipients', [])
+    invitees = meeting.get('invitees') or []
+    recipients = meeting.get('resolved_recipients') or []
 
     # --- 1. Exact Name Matches (Highest Confidence) ---
     exact_candidates = {} # email -> source

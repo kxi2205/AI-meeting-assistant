@@ -830,14 +830,14 @@ class MeetingBot:
                 print("  [WAIT] Waiting to ensure meeting is fully loaded before opening chat...")
                 await asyncio.sleep(5)
                 
-                chat_button = self.page.locator('button[aria-label*="chat with everyone" i], button[aria-label*="chat" i]').first
+                chat_button = self.page.locator('button[aria-label*="chat" i], button[aria-label*="message" i], button[data-tooltip*="chat" i], button[data-panel-id="chat"]').first
                 try:
                     await chat_button.wait_for(state="visible", timeout=10000)
                     await chat_button.click()
                     print("  [SUCCESS] Opened chat panel")
                     
                     # WAIT for chat panel to expand
-                    chat_input = self.page.locator('textarea[name="chatTextInput"], textarea[aria-label*="chat" i], aside textarea').first
+                    chat_input = self.page.locator('textarea[name="chatTextInput"], textarea[aria-label*="message" i], textarea[aria-label*="chat" i], aside textarea').first
                     await chat_input.wait_for(state="visible", timeout=10000)
                     
                     # Focus, fill, and send

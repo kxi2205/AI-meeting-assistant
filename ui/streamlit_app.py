@@ -950,6 +950,33 @@ def new_meeting_page():
     """Page for uploading and processing new meetings"""
     st.header("Process Recording")
     
+    if 'last_processed_meeting' in st.session_state and st.session_state.last_processed_meeting:
+        if st.button("Process Another Recording", type="secondary"):
+            st.session_state.last_processed_meeting = None
+            st.rerun()
+            
+        m = st.session_state.last_processed_meeting
+        st.success("Meeting processed successfully!")
+        
+        with st.expander("Analytical Summary", expanded=True):
+            st.markdown(m['summary'])
+            
+        if m['action_items']:
+            with st.expander("Action Items", expanded=True):
+                for i, item in enumerate(m['action_items'], 1):
+                    st.markdown(f"**{i}. {item['task']}**")
+                    col1, col2, col3 = st.columns(3)
+                    col1.caption(f"Owner: {item.get('owner', 'Unassigned')}")
+                    col2.caption(f"Deadline: {item.get('deadline', 'Not specified')}")
+                    col3.caption(f"Priority: {item.get('priority', 'medium').upper()}")
+                    st.divider()
+                    
+        st.markdown("---")
+        st.markdown("### Communication Dispatch")
+        st.markdown("Verify details and distribute the meeting intelligence report.")
+        dispatch_summary(m['summary'], m['action_items'], m['title'], m['participants_list'], m['transcript_text'], meeting_id=m['meeting_id'])
+        return
+
     # Meeting details
     meeting_title = st.text_input("Session Title", placeholder="e.g., Strategic Planning")
     participants = st.text_input(
@@ -1069,12 +1096,17 @@ def process_meeting(audio_file, title, participants_str):
         st.success("Meeting processed and saved successfully!")
         st.balloons()
         
-        # Dispatch Center
-        st.markdown("---")
-        st.markdown("### Communication Dispatch")
-        st.markdown("Verify details and distribute the meeting intelligence report.")
-        
-        dispatch_summary(summary, action_items, title, participants_list, transcript_text, meeting_id=meeting_id)
+        st.session_state.last_processed_meeting = {
+            'summary': summary,
+            'action_items': action_items,
+            'title': title,
+            'participants_list': participants_list,
+            'transcript_text': transcript_text,
+            'meeting_id': meeting_id
+        }
+        import time
+        time.sleep(2)
+        st.rerun()
         
     except Exception as e:
         st.error(f"Error processing meeting: {e}")
